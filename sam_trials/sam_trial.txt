@@ -1,0 +1,105 @@
+HOW sam_trial.py WORKS
+======================
+
+Overview
+--------
+sam_trial.py runs SAM's automatic mask generator on BRIO construction images
+for samples 31-41. For each sample it compares the number of detected masks
+against the ground-truth component count from the PUML file, saves a
+visualisation, and writes a JSON summary to 11-experiments/.
+
+
+1. Loading SAM
+--------------
+The script loads the ViT-B SAM checkpoint and creates a
+SamAutomaticMaskGenerator. This is SAM's zero-prompt pipeline: it tiles the
+image with a 64x64 grid of point prompts (4096 total), runs the mask decoder
+for each point, then applies NMS to remove overlapping predictions.
+
+Key parameters (tuned for BRIO images):
+  points_per_side=64          denser grid to catch small components
+  pred_iou_thresh=0.85        keep only high-confidence masks
+  stability_score_thresh=0.92 filter unstable mask boundaries
+  crop_n_layers=1             extra crop pass to improve small-object recall
+  min_mask_region_area=300    SAM-side noise filter
+  box_nms_thresh=0.5          NMS overlap threshold
+
+
+2. PUML Parsing
+---------------
+parse_puml(n) reads InstanceDiagramSN.puml and extracts the ground-truth
+component manifest. PUML component entries look like:
+
+  object "bo_1 : Component"
+  object "bo_2 : Component"
+  object "sb_1 : Component"
+
+The parser uses a regex to find all such entries, strips the numeric suffix
+(_1, _2, ...), and counts occurrences per abbreviation prefix:
+
+  {"bo": 2, "sb": 1}
+
+sum(manifest.values()) is the total number of components that should be
+present in the image. This is the target count SAM must match.
+
+
+3. Running SAM
+--------------
+For each sample:
+  1. Load the construction image (Construction.jpeg or Construction.jpg)
+  2. Call mask_generator.generate(image) -- the core SAM inference call
+  3. Apply filter_masks() to remove background and noise:
+       - drop masks smaller than 300 px  (noise)
+       - drop masks larger than 50% of image area  (table/background)
+     SAM's own min_mask_region_area handles the lower bound during generation;
+     the upper-area guard is custom post-processing.
+
+
+4. Validation
+-------------
+The filtered mask count is compared to the PUML-derived expected count:
+
+  OK     -- len(masks) == expected
+  SHORT  -- len(masks) <  expected  (SAM missed some components)
+  OVER   -- len(masks) >  expected  (SAM over-segmented)
+
+SAM quality metrics logged per sample:
+  predicted_iou     -- SAM's own confidence estimate for each mask
+  stability_score   -- how stable the mask boundary is under threshold changes
+  area              -- mask size in pixels
+
+
+5. Output
+---------
+Per sample:
+  - 11-experiments/visualizations/sample_NNN_masks.png
+      Left panel:  original image
+      Right panel: coloured mask overlay with bounding boxes and PUML summary
+
+After all samples:
+  - 11-experiments/sam_trial_summary.json
+      One entry per sample with image path, image size, PUML manifest,
+      expected count, raw/filtered mask counts, status, IoU stats, area stats.
+  - Console summary: count of OK / SHORT / OVER / ERROR results
+
+
+What comes from SAM vs. what is custom
+---------------------------------------
+FROM SAM LIBRARY:
+  sam_model_registry, SamAutomaticMaskGenerator   (segment_anything API)
+  mask_generator.generate(image)                  (inference call)
+  Output mask dict fields:
+    m["segmentation"]     boolean H x W pixel mask
+    m["bbox"]             [x, y, width, height] in pixels
+    m["area"]             number of True pixels in segmentation
+    m["predicted_iou"]    SAM's confidence score
+    m["stability_score"]  mask boundary stability metric
+
+CUSTOM (written for this project):
+  BATCH_DIRS + get_sample_dir()   navigate the 150-sample BRIO folder layout
+  get_image()                     find Construction.jpeg or .jpg
+  parse_puml()                    extract ground-truth manifest from PUML
+  load_rgb()                      OpenCV load + BGR-to-RGB conversion
+  filter_masks()                  area-based post-processing (noise + background)
+  visualize()                     matplotlib side-by-side with PUML summary
+  Main evaluation loop            OK/SHORT/OVER logic, JSON summary

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Large pipeline cache files
+brio_3d_pipeline/outputs/
+brio_3d_pipeline/logs/
+
+# YOLO training outputs and generated dataset
+brio_pipeline/brio_fast_pipeline/runs/
+brio_pipeline/brio_fast_pipeline/dataset/
+brio_pipeline/brio_fast_pipeline/logs/
+
+# Model weights
+*.pth
+*.pt

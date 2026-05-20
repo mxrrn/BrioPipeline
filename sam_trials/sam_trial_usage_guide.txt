@@ -1,0 +1,87 @@
+SAM TRIAL — SETUP AND USAGE GUIDE
+==================================
+
+
+1. RUNNING THE SCRIPT
+---------------------
+Activate the SAM conda environment first, then run the script:
+
+  conda activate sam
+  cd /mnt/c/BA/00-project
+  python sam_trial.py
+
+To change which samples are processed, edit this line in sam_trial.py:
+
+  SAMPLES = list(range(31, 42))   # currently runs samples 31 to 41
+
+Examples:
+  list(range(1, 11))       samples 1-10
+  list(range(50, 60))      samples 50-59
+  [5, 12, 44]              specific samples by number
+  list(range(1, 151))      all 150 samples (slow — ~1-2 min per sample on CPU)
+
+Output is written to:
+  11-experiments/visualizations/sample_NNN_masks.png   one image per sample
+  11-experiments/sam_trial_summary.json                aggregate results
+
+
+2. VERIFYING ANNOTATIONS
+------------------------
+Open the visualisation PNGs in 11-experiments/visualizations/.
+Each image shows:
+  Left   — original construction photo
+  Right  — colour-coded mask overlay with bounding boxes and mask index numbers
+            + PUML manifest and counts in the bottom caption
+
+The mask index numbers on the right panel correspond to the order SAM returned
+them (0, 1, 2, ...). Use the status field in the JSON to quickly find
+problem samples:
+
+  "status": "OK"     mask count matches PUML expected count---------------------+-
+  "status": "SHORT"  SAM found fewer masks than expected — missed components
+  "status": "OVER"   SAM found more masks than expected — over-segmented
+
+
+3. THE MERGING PROBLEM (current limitation)
+--------------------------------------------
+sam_trial_summary.json only stores aggregate stats (counts, IoU averages,
+areas). It does not save the individual mask polygons or bounding boxes,
+so there is currently no file you can open and edit to merge two masks.
+
+This is a real gap: SAM sometimes splits a single BRIO component into two
+masks (e.g. a brick top face and front face detected separately).
+
+
+4. HOW TO ENABLE MASK EDITING
+------------------------------
+The fix is to extend sam_trial.py to export individual mask data in a
+format that a standard annotation tool can open and edit.
+
+Recommended tool: LabelMe (local, lightweight, no account needed)
+
+  pip install labelme      (inside the sam environment)
+  labelme                  (launches the GUI)
+
+To make this work, sam_trial.py needs to be extended to:
+  a) Export each sample's masks to LabelMe JSON format after generation
+     (one .json per image, saved next to the PNG in visualizations/)
+  b) After you edit the LabelMe file (merge, delete, redraw masks),
+     a second script reads the corrected JSON back in
+
+LabelMe JSON stores each mask as a polygon under a "shapes" key.
+Merging two masks means selecting their polygons in LabelMe and using
+Edit > Merge Selected Shapes, or deleting both and drawing a new one.
+
+This export/import extension does not exist yet in the codebase.
+Ask the sam-annotator agent to add it when you are ready to start
+producing training labels.
+
+
+5. QUICK REFERENCE
+------------------
+Script location:    /mnt/c/BA/00-project/sam_trial.py
+Visualisations:     /mnt/c/BA/11-experiments/visualizations/
+JSON summary:       /mnt/c/BA/11-experiments/sam_trial_summary.json
+Conda env:          sam
+SAM weights:        /mnt/c/BA/03-code/sam_weights/sam_vit_b_01ec64.pth
+Construction data:  /mnt/c/BA/02-resources/data/constructions/
