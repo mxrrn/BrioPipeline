@@ -8,13 +8,15 @@ Improvements over v1
 * Feature vector = [3D median centroid (3) + mean HSV colour (3)] with
   independent normalisation so colour and geometry contribute equally.
 * Agglomerative clustering (Ward, n_clusters=N) — globally optimal.
-* DBSCAN cleanup per cluster removes noisy outlier background points.
+* Sigma cleanup per cluster (O(n), no tree) — WSL2 OOM-safe.
 """
 import pickle
 import numpy as np
 import cv2
 from pathlib import Path
-from sklearn.cluster import AgglomerativeClustering, DBSCAN
+from sklearn.cluster import AgglomerativeClustering
+
+_CLOUD_MAX_PTS = 5_000   # cap per-mask cloud to bound downstream memory
 
 
 # ── Point cloud helpers ───────────────────────────────────────────────────────
@@ -29,7 +31,11 @@ def _extract_mask_cloud(pts3d_frame: np.ndarray, mask: np.ndarray) -> np.ndarray
         ).astype(bool)
     pts   = pts3d_frame[mask]
     valid = np.linalg.norm(pts, axis=1) > 1e-6
-    return pts[valid].astype(np.float32)
+    pts   = pts[valid].astype(np.float32)
+    if len(pts) > _CLOUD_MAX_PTS:
+        idx = np.random.choice(len(pts), _CLOUD_MAX_PTS, replace=False)
+        pts = pts[idx]
+    return pts
 
 
 def _median_centroid(pts: np.ndarray) -> np.ndarray:
@@ -54,23 +60,15 @@ def _mean_hsv(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return (mean / np.array([180., 255., 255.])).astype(np.float32)
 
 
-def _dbscan_cleanup(pts: np.ndarray,
-                    eps_frac: float = 0.08,
-                    min_samples: int = 30) -> np.ndarray:
-    """
-    Keep only the largest dense cluster; discard outliers and background bleed.
-    eps is computed as a fraction of the cluster's own bounding-box diameter.
-    """
-    if len(pts) < min_samples * 3:
+def _sigma_cleanup(pts: np.ndarray, n_sigma: float = 2.5) -> np.ndarray:
+    """O(n) outlier removal: discard points beyond mean+n_sigma*std distance from median."""
+    if len(pts) < 10:
         return pts
-    diam = float(np.linalg.norm(pts.max(0) - pts.min(0)))
-    eps  = max(diam * eps_frac, 1e-5)
-    labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit_predict(pts)
-    good = labels >= 0
-    if good.sum() == 0:
-        return pts
-    best = np.argmax(np.bincount(labels[good]))
-    return pts[labels == best].astype(np.float32)
+    centre = np.median(pts, axis=0)
+    dists  = np.linalg.norm(pts - centre, axis=1)
+    thresh = np.mean(dists) + n_sigma * np.std(dists)
+    keep   = dists <= thresh
+    return pts[keep].astype(np.float32) if keep.sum() > 0 else pts
 
 
 # ── Main API ──────────────────────────────────────────────────────────────────
@@ -92,7 +90,7 @@ def compute_proposals(dust3r_result: dict,
 
     Returns list of N (M_i, 3) world-space float32 arrays.
     """
-    cache_file = output_dir / f"proposals_N{n_components}_v2.pkl"
+    cache_file = output_dir / f"proposals_N{n_components}_v3.pkl"
     if cache_file.exists():
         print(f"[Backproject] Loading cached proposals from {cache_file}")
         with open(cache_file, "rb") as f:
@@ -155,16 +153,16 @@ def compute_proposals(dust3r_result: dict,
         n_clusters=n_components, metric="euclidean", linkage="ward"
     ).fit_predict(feat)
 
-    # ── Merge + DBSCAN cleanup ────────────────────────────────────────────
+    # ── Merge + sigma cleanup ─────────────────────────────────────────────
     merged = []
     for cid in range(n_components):
         idx    = np.where(labels == cid)[0]
         raw    = np.concatenate([all_clouds[i] for i in idx], axis=0) \
                  if len(idx) else np.empty((0, 3), np.float32)
-        clean  = _dbscan_cleanup(raw) if len(raw) >= 90 else raw
+        clean  = _sigma_cleanup(raw)
         merged.append(clean)
 
-    print(f"[Backproject] Results after DBSCAN cleanup:")
+    print(f"[Backproject] Results after sigma cleanup:")
     for i, pts in enumerate(merged):
         c = _median_centroid(pts)
         print(f"  Cluster {i}: {len(pts):>7d} pts | "
