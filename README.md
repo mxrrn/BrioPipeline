@@ -2,9 +2,13 @@
 
 **Bachelor's Thesis:** 3D Object Detection from Multi-View 2D Input Images of Multi-Component Constructions and Knowledge-Aware Structure Diagram Generation in PlantUML
 
+---
+
 ## Problem
 
-BRIO construction toys are assembled from discrete physical components (bolts, nuts, screws, plates, wheels, etc.) that connect through typed attachment points. Given a photograph of a completed construction, the goal is to automatically infer its full structural topology — which components are present, what slots they expose, and how those slots are connected — and represent that structure as a PlantUML instance diagram.
+BRIO construction toys are assembled from discrete physical components (bolts, nuts, screws, plates, wheels, etc.) that connect through typed attachment points. Given a set of photographs of a completed construction, the goal is to automatically identify which components are present, localise them in 3D, infer their connections, and represent the result as a PlantUML instance diagram.
+
+---
 
 ## Domain Model
 
@@ -16,111 +20,149 @@ Construction
                     └── belongs to a Component
 ```
 
-### Definitions
-
 | Term | Definition |
 |------|-----------|
 | **Component** | A physical BRIO part (e.g., bolt, nut, plate, wheel). Has one or more slots. |
 | **Slot** | A typed attachment point on a component (e.g., opening, pin, thread). |
-| **Connection** | A link formed by exactly two slots joining together (e.g., a pin inserted into an opening). |
-| **Connection Configuration** | A group of one or more connections that share a common joint point. |
-| **Construction** | The complete physical assembly, composed of one or many connection configurations. |
+| **Connection** | A link formed by exactly two slots joining together. |
+| **Connection Configuration** | A group of connections that share a common joint point. |
+| **Construction** | The complete physical assembly. |
 
-### Component Types (30 known)
+---
 
-| Abbreviation | Part | Abbreviation | Part |
-|---|---|---|---|
-| `bo` | Bolt | `ro lo` | Roller |
-| `nu` | Nut | `rome` | Rod medium |
-| `pl` | Plug | `rosm` | Rod small |
-| `sl` | Sleeve | `sclo` | Screw long |
-| `wa` | Washer | `scme` | Screw medium |
-| `ti` | Tire | `scsm` | Screw small |
-| `no` | Nose/Nozzle | `whre` | Wheel red |
-| `whwh` | Wheel white | `stwo3`-`stwo9` | Star wheel (sizes 3-9) |
-| `blwo11` | Block w/ 1x1 openings | `plwo21`-`plwo53` | Plate w/ openings (various) |
-| `plpl53` | Plate/Plug 5x3 | `stpl5` | Step plate 5 |
+## Dataset
 
-### Slot Types (9 known)
-
-| Type | Meaning | Used By |
-|---|---|---|
-| `{op}` | Opening | Plates, blocks, star wheels, sleeves, noses |
-| `{pi}` | Pin | Bolts |
-| `{th}` | Thread | Nuts |
-| `{thjo}` | Thread joint | Screws, rods, rollers |
-| `{sh}` | Shaft | Plugs |
-| `{slsh}` | Slot shaft | Plugs (variant) |
-| `{slpi}` | Slot pin | Bolts (variant) |
-| `{gr}` | Grip/Groove | Wheels |
-| `{to}` | Torus | Tires |
-
-## Data
-
-~150 annotated BRIO construction samples, each containing:
+~150 annotated BRIO construction samples. Each sample contains:
 
 | File | Description |
 |------|-------------|
 | `Construction.jpg` | Photograph of the physical construction |
-| `InstanceDiagramSN.puml` | Human-readable PlantUML instance diagram with component names and slot types |
-| `InstanceDiagramSN_AI.puml` | Anonymized PlantUML diagram (all names replaced with sequential integer IDs) |
-| `InstanceDiagramSN.png` | Rendered human-readable diagram |
-| `InstanceDiagramSN_AI.png` | Rendered anonymized diagram |
-| `Mapping.drawio` | Visual mapping between photo regions and abstract components |
-| `Mapping.png` | Rendered mapping image |
+| `InstanceDiagramSN.puml` | Ground-truth PlantUML instance diagram |
+| `Mapping.drawio` | Visual mapping between photo regions and components |
 
-### Naming Conventions in PlantUML
+**Multi-view images:** ~78 photographs per sample at four elevation rings (30°, 45°, 60°, 90°) and 24 azimuth positions.
 
-- **Component**: `abbreviation_instanceNum` (e.g., `stwo3_1`, `bo_2`)
-- **Slot**: `component&{slotType}_slotNum` (e.g., `stwo3_1&{op}_2`)
-- **Connection**: `slotA#slotB` (e.g., `stwo3_1&{op}_1#bo_1&{pi}_1`)
-- **ConnectionConfig**: `~connection1 * connection2 * ...~` (grouped by shared joint)
+**Complexity range:**
+- Smallest: 2 components, 1 connection
+- Largest: 10+ components, 13+ connections
+- Typical: 4–7 components, 3–9 connections
 
-### Real Example (Sample 55 — 4 components)
+### Component vocabulary (29 types)
 
-A construction with a plug, bolt, washer, and sleeve:
+| Code | Part | Code | Part |
+|------|------|------|------|
+| `bo` | Bolt | `nu` | Nut |
+| `pl` | Plug | `sl` | Sleeve |
+| `wa` | Washer | `ti` | Tire |
+| `no` | Nose connector | `ro_lo` | Long rod |
+| `rome` | Medium rod | `rosm` | Short rod |
+| `sclo` | Long screw | `scme` | Medium screw |
+| `scsm` | Small screw | `whre` | Red wheel |
+| `whwh` | White wheel | `blwo11` | Wooden block 1×1 |
+| `blwo21` | Wooden block 2×1 | `plwo21` | Wooden plate 2×1 |
+| `plwo31` | Wooden plate 3×1 | `plwo33` | Wooden plate 3×3 |
+| `plwo53` | Wooden plate 5×3 | `plpl53` | Plastic plate 5×3 |
+| `stwo3`–`stwo9` | Wooden straps (lengths 3–9) | `stpl5` | Plastic strap 5 |
+
+---
+
+## Implemented Solution
+
+The implemented system is a two-stage pipeline.  
+Full documentation: **[brio_pipeline/README.md](brio_pipeline/README.md)**
+
+### Stage 1 — Slow Annotation Pipeline (`brio_3d_pipeline/`)
+
+Runs once per sample to produce 3D ground-truth labels for training. Runtime ~35 minutes per sample on GPU.
 
 ```
-Components: pl_1, bo_1, wa_1, sl_1
-Slots:      pl_1&{slsh}_1, bo_1&{pi}_1, bo_1&{slpi}_1, wa_1&{op}_1, sl_1&{op}_1
-
-Connections:
-  pl_1&{slsh}_1 # bo_1&{slpi}_1    (plug shaft into bolt slot-pin)
-  bo_1&{pi}_1   # wa_1&{op}_1      (bolt pin into washer opening)
-  bo_1&{pi}_1   # sl_1&{op}_1      (bolt pin into sleeve opening)
-
-Connection Configurations:
-  CC1: pl_1&{slsh}_1#bo_1&{slpi}_1
-  CC2: bo_1&{pi}_1#wa_1&{op}_1 * bo_1&{pi}_1#sl_1&{op}_1
+14 multi-view images
+  ↓  DUSt3R        — uncalibrated multi-view 3D reconstruction (pts3d per pixel)
+  ↓  SAM (ViT-B)   — automatic mask generation (top-N masks per image)
+  ↓  Back-project  — SAM masks × pts3d → 14×N raw 3D point clouds
+  ↓  Ward clustering + sigma cleanup → N instance clouds
+  ↓  Hungarian assignment (geometry + colour cost) → class label per cloud
+outputs/sample_N/results.json   — instances with 3D centroids and class labels
 ```
 
-### Complexity Range
+Outputs feed directly into Stage 2 as YOLO training labels.
 
-- **Smallest**: 2 components, 2 slots, 1 connection, 1 ConnectionConfig
-- **Largest**: 10+ components, 18+ slots, 13+ connections, 4+ ConnectionConfigs
-- **Typical**: 4-7 components, 5-11 slots, 3-9 connections, 2-3 ConnectionConfigs
+### Stage 2 — Fast Inference Pipeline (`brio_pipeline/brio_fast_pipeline/`)
 
-## Approach
+Trained on Stage 1 labels. Inference is under 2 seconds per sample on GPU.
 
-### Input
-- **Multi-view 2D images** of the construction (currently 1 photo per sample)
-- **PlantUML instance diagrams** as ground-truth structural labels (training only)
+```
+Training (once):
+  label_exporter.py  →  YOLO-format dataset from Stage 1 outputs
+  train.py           →  fine-tunes YOLOv8n from COCO pretrained weights
 
-### Output
-- **Predicted connection topology**: which components are present, their slots, and how they connect
+Calibration (once):
+  calibrator.py      →  fixed camera rig from DUSt3R poses (normalised, averaged)
 
-### Method (Under Investigation)
+Inference:
+  14 images → YOLOv8 detection → DLT triangulation → connection inference → PlantUML
+```
 
-Investigating whether the **PETR** (Position Embedding Transformation) architecture — designed for multi-view 3D object detection — can be adapted for structural relationship prediction:
+### Launcher scripts
 
-1. Backbone CNN extracts 2D features from input image(s)
-2. Position embedding transforms 2D features into 3D-aware representations
-3. Decoder predicts structural relationships instead of bounding boxes
+All phases are run from `brio_pipeline/` with short commands:
 
-The key question: can a pipeline built for detecting 3D objects (cars, pedestrians) be repurposed to detect **structural connections** between construction components?
+| Command | What it does |
+|---------|--------------|
+| `./slow.sh 113 114 115` | Annotate samples with the slow pipeline |
+| `./labels.sh` | Export YOLO labels from completed samples |
+| `./calibrate.sh 113` | Build fixed camera rig calibration |
+| `./train.sh` | Train YOLOv8n |
+| `./infer.sh 120` | Run fast inference on a sample |
+| `./visualize.sh 113` | 3D scatter plot of instance clouds |
+
+Logs are written automatically on every run.
+
+---
+
+## Repository Layout
+
+```
+00-project/
+├── README.md               ← this file
+├── .gitignore
+│
+├── brio_3d_pipeline/       ← slow annotation pipeline (source code)
+│   ├── pipeline.py
+│   ├── config.py
+│   ├── backprojector.py
+│   ├── classifier.py
+│   └── ...
+│
+├── brio_pipeline/          ← fast pipeline + launcher scripts
+│   ├── README.md           ← full pipeline documentation
+│   ├── slow.sh / infer.sh / train.sh / ...
+│   └── brio_fast_pipeline/
+│       ├── infer.py
+│       ├── train.py
+│       └── ...
+│
+└── sam_trials/             ← earlier SAM integration experiments
+```
+
+> **Note:** `brio_3d_pipeline/outputs/` (DUSt3R/SAM caches, ~37 MB per sample) is excluded from git via `.gitignore`. Run `./slow.sh <sample_ids>` to regenerate.
+
+---
+
+## Environment
+
+- Python 3.10, conda env `brio-3d`
+- PyTorch + CUDA 12.4 (`cu124`) on RTX 2070 Super (8 GB)
+- DUSt3R (ViT-L, `07-dust3r/`), SAM ViT-B, YOLOv8n (ultralytics)
+- WSL2 on Windows 11
+
+Setup instructions: [brio_pipeline/README.md § Environment Setup](brio_pipeline/README.md#10-environment-setup)
+
+---
 
 ## References
 
-1. Liu et al. (2022) — *PETR: Position Embedding Transformation for Multi-View 3D Object Detection*
-2. Chen et al. (2023) — *Viewpoint Equivariance for Multi-View 3D Object Detection*
-3. Yang & Wang (2019) — *Learning Relationships for Multi-View 3D Object Recognition*
+1. Wang et al. (2024) — *DUSt3R: Geometric 3D Vision Made Easy*
+2. Kirillov et al. (2023) — *Segment Anything*
+3. Jocher et al. (2023) — *Ultralytics YOLOv8*
+4. Liu et al. (2022) — *PETR: Position Embedding Transformation for Multi-View 3D Object Detection*
