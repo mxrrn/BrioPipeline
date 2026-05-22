@@ -71,7 +71,7 @@ Construction
 The implemented system is a two-stage pipeline.  
 Full documentation: **[brio_pipeline/README.md](brio_pipeline/README.md)**
 
-### Stage 1 — Slow Annotation Pipeline (`brio_3d_pipeline/`)
+### Stage 1 — Slow Annotation Pipeline (`brio_pipeline/brio_3d_pipeline/`)
 
 Runs once per sample to produce 3D ground-truth labels for training. Runtime ~35 minutes per sample on GPU.
 
@@ -127,17 +127,16 @@ Logs are written automatically on every run.
 ├── README.md               ← this file
 ├── .gitignore
 │
-├── brio_3d_pipeline/       ← slow annotation pipeline (source code)
-│   ├── pipeline.py
-│   ├── config.py
-│   ├── backprojector.py
-│   ├── classifier.py
-│   └── ...
-│
-├── brio_pipeline/          ← fast pipeline + launcher scripts
+├── brio_pipeline/          ← both pipelines + launcher scripts
 │   ├── README.md           ← full pipeline documentation
 │   ├── slow.sh / infer.sh / train.sh / ...
-│   └── brio_fast_pipeline/
+│   ├── brio_3d_pipeline/   ← slow annotation pipeline (source code)
+│   │   ├── pipeline.py
+│   │   ├── config.py
+│   │   ├── backprojector.py
+│   │   ├── classifier.py
+│   │   └── ...
+│   └── brio_fast_pipeline/ ← fast inference pipeline
 │       ├── infer.py
 │       ├── train.py
 │       └── ...
@@ -145,7 +144,7 @@ Logs are written automatically on every run.
 └── sam_trials/             ← earlier SAM integration experiments
 ```
 
-> **Note:** `brio_3d_pipeline/outputs/` (DUSt3R/SAM caches, ~37 MB per sample) is excluded from git via `.gitignore`. Run `./slow.sh <sample_ids>` to regenerate.
+> **Note:** `brio_pipeline/brio_3d_pipeline/outputs/` (DUSt3R/SAM caches, ~37 MB per sample) is excluded from git via `.gitignore`. Run `./slow.sh <sample_ids>` to regenerate.
 
 ---
 

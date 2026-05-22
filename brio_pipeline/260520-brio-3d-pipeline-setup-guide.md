@@ -128,10 +128,10 @@ Subsequent runs use the cached model in `~/.cache/huggingface/`.
 
 ## Step 5 — Project Structure
 
-All pipeline code lives in `00-project/brio_3d_pipeline/`:
+All pipeline code lives in `00-project/brio_pipeline/brio_3d_pipeline/`:
 
 ```
-00-project/brio_3d_pipeline/
+00-project/brio_pipeline/brio_3d_pipeline/
 ├── __init__.py
 ├── config.py           # central paths and settings
 ├── puml_parser.py      # parse PUML → component manifest (N, class list)
@@ -182,7 +182,7 @@ Always activate the `brio-3d` environment first:
 
 ```bash
 conda activate brio-3d
-cd /mnt/c/BA/00-project/brio_3d_pipeline
+cd /mnt/c/BA/00-project/brio_pipeline/brio_3d_pipeline
 ```
 
 **Single sample:**

@@ -5,5 +5,5 @@
 #   ./visualize.sh 113
 
 PY=/home/mxrn/miniconda3/envs/brio-3d/bin/python
-cd /mnt/c/BA/00-project/brio_3d_pipeline
+cd "$(dirname "$0")/brio_3d_pipeline"
 $PY visualize.py --sample "$1"

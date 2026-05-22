@@ -97,29 +97,7 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 ```
 00-project/
 │
-├── brio_3d_pipeline/   # Slow pipeline (WSL-accessible at this level)
-│   ├── pipeline.py     # Entry point
-│   ├── config.py       # Paths and settings
-│   ├── logger.py       # Automatic logging
-│   ├── puml_parser.py
-│   ├── preprocessor.py
-│   ├── dust3r_runner.py
-│   ├── sam_runner.py
-│   ├── backprojector.py
-│   ├── classifier.py
-│   ├── component_map.py
-│   ├── visualize.py
-│   ├── logs/           # Auto-created; one .log per run
-│   └── outputs/
-│       └── sample_N/
-│           ├── cropped/
-│           ├── dust3r/dust3r_cache.pkl
-│           ├── sam/sam_masks_topN.pkl
-│           ├── proposals/proposals_NX_v3.pkl
-│           ├── results.json
-│           └── viz_3d.png
-│
-└── brio_pipeline/      # Fast pipeline + launchers
+└── brio_pipeline/      # Both pipelines + launchers
     ├── slow.sh             # Launcher: slow annotation pipeline
     ├── visualize.sh        # Launcher: 3D visualisation
     ├── labels.sh           # Launcher: YOLO label export
@@ -129,24 +107,46 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
     ├── README.md           # This file
     ├── 260520-brio-3d-pipeline-setup-guide.md
     │
+    ├── brio_3d_pipeline/   # Slow pipeline
+    │   ├── pipeline.py     # Entry point
+    │   ├── config.py       # Paths and settings
+    │   ├── logger.py       # Automatic logging
+    │   ├── puml_parser.py
+    │   ├── preprocessor.py
+    │   ├── dust3r_runner.py
+    │   ├── sam_runner.py
+    │   ├── backprojector.py
+    │   ├── classifier.py
+    │   ├── component_map.py
+    │   ├── visualize.py
+    │   ├── logs/           # Auto-created; one .log per run
+    │   └── outputs/
+    │       └── sample_N/
+    │           ├── cropped/
+    │           ├── dust3r/dust3r_cache.pkl
+    │           ├── sam/sam_masks_topN.pkl
+    │           ├── proposals/proposals_NX_v3.pkl
+    │           ├── results.json
+    │           └── viz_3d.png
+    │
     └── brio_fast_pipeline/ # Fast pipeline
-    ├── config.py
-    ├── logger.py       # Automatic logging
-    ├── label_exporter.py
-    ├── calibrator.py
-    ├── detector.py
-    ├── triangulator.py
-    ├── connector.py
-    ├── puml_generator.py
-    ├── train.py
-    ├── infer.py
-    ├── logs/           # Auto-created; one .log per run
-    ├── calibration/rig_poses.pkl
-    ├── dataset/        # YOLO-format training data
-    └── outputs/
-        └── sample_N/
-            ├── predicted.puml
-            └── results.json
+        ├── config.py
+        ├── logger.py       # Automatic logging
+        ├── label_exporter.py
+        ├── calibrator.py
+        ├── detector.py
+        ├── triangulator.py
+        ├── connector.py
+        ├── puml_generator.py
+        ├── train.py
+        ├── infer.py
+        ├── logs/           # Auto-created; one .log per run
+        ├── calibration/rig_poses.pkl
+        ├── dataset/        # YOLO-format training data
+        └── outputs/
+            └── sample_N/
+                ├── predicted.puml
+                └── results.json
 ```
 
 ---

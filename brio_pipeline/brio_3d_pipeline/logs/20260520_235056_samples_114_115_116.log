@@ -1,0 +1,19 @@
+# Log: 20260520_235056_samples_114_115_116.log
+# Started: 2026-05-20T23:50:56
+# Command: pipeline.py --samples 114 115 116
+# PID: 231688
+------------------------------------------------------------
+[Log] Writing to /mnt/c/BA/00-project/brio_3d_pipeline/logs/20260520_235056_samples_114_115_116.log
+[Pre-pass] Computing global crop scale across all samples...
+[Crop] Global half-size: 297 px (raw max 246.7 + 20% padding) → 594×594 px crops
+
+============================================================
+ Sample 114
+============================================================
+[PUML] 7 components: ['plwo53', 'stwo3', 'stwo3', 'scsm', 'scsm', 'nu', 'nu']
+[Images] 12 images (Images90: 6, Images45: 6)
+[Crop] Using cached 594×594 crops from /mnt/c/BA/00-project/brio_3d_pipeline/outputs/sample_114/cropped
+[DUSt3R] Loading cached results from /mnt/c/BA/00-project/brio_3d_pipeline/outputs/sample_114/dust3r/dust3r_cache.pkl
+[SAM] Loading cached masks from /mnt/c/BA/00-project/brio_3d_pipeline/outputs/sample_114/sam/sam_masks_top7.pkl
+[Backproject] 12 views × top-7 masks  colour=yes
+[Backproject] Clustering 84 clouds into 7 groups using geometry + colour features
