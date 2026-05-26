@@ -10,6 +10,15 @@ from pathlib import Path
 import cv2
 
 
+_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+def _clahe_enhance(bgr: np.ndarray) -> np.ndarray:
+    """Boost local contrast in LAB space so white components stand out from white backgrounds."""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = _CLAHE.apply(lab[:, :, 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
 def run_sam_on_images(image_paths: list[Path], n_components: int,
                       output_dir: Path, weights_path: Path,
                       model_type: str = "vit_b", device: str = "cuda",
@@ -49,6 +58,7 @@ def run_sam_on_images(image_paths: list[Path], n_components: int,
     all_masks = []
     for idx, img_path in enumerate(image_paths):
         image_bgr = cv2.imread(str(img_path))
+        image_bgr = _clahe_enhance(image_bgr)
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
         masks = mask_gen.generate(image_rgb)

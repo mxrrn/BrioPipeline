@@ -54,7 +54,7 @@ Construction
 | `bo` | Bolt | `nu` | Nut |
 | `pl` | Plug | `sl` | Sleeve |
 | `wa` | Washer | `ti` | Tire |
-| `no` | Nose connector | `ro_lo` | Long rod |
+| `no` | Nose connector | `rolo` | Long rod |
 | `rome` | Medium rod | `rosm` | Short rod |
 | `sclo` | Long screw | `scme` | Medium screw |
 | `scsm` | Small screw | `whre` | Red wheel |
@@ -73,16 +73,18 @@ Full documentation: **[brio_pipeline/README.md](brio_pipeline/README.md)**
 
 ### Stage 1 — Slow Annotation Pipeline (`brio_pipeline/brio_3d_pipeline/`)
 
-Runs once per sample to produce 3D ground-truth labels for training. Runtime ~35 minutes per sample on GPU.
+Runs once per sample to produce 3D ground-truth labels for training. Runtime ~35 minutes per sample on GPU (cold), ~2 minutes with cache.
 
 ```
-14 multi-view images
-  ↓  DUSt3R        — uncalibrated multi-view 3D reconstruction (pts3d per pixel)
-  ↓  SAM (ViT-B)   — automatic mask generation (top-N masks per image)
-  ↓  Back-project  — SAM masks × pts3d → 14×N raw 3D point clouds
+~20 multi-view images (all 4 elevation rings, stride 4)
+  ↓  CLAHE enhancement — boosts local contrast for white components
+  ↓  DUSt3R (ViT-L) — uncalibrated multi-view 3D reconstruction
+  ↓  SAM (ViT-B)    — automatic mask generation (top-N per image)
+  ↓  Back-projection — SAM masks × pts3d → ~20N raw 3D clouds
   ↓  Ward clustering + sigma cleanup → N instance clouds
-  ↓  Hungarian assignment (geometry + colour cost) → class label per cloud
-outputs/sample_N/results.json   — instances with 3D centroids and class labels
+  ↓  Visual classifier (MobileNetV3-small) — majority-votes class per cluster
+  ↓  Hungarian assignment (visual + colour cost) → class label per cloud
+outputs/run_NNN_YYYYMMDD_HHMM/sample_N/results.json
 ```
 
 Outputs feed directly into Stage 2 as YOLO training labels.
@@ -100,7 +102,7 @@ Calibration (once):
   calibrator.py      →  fixed camera rig from DUSt3R poses (normalised, averaged)
 
 Inference:
-  14 images → YOLOv8 detection → DLT triangulation → connection inference → PlantUML
+  ~20 images → YOLOv8 detection → DLT triangulation → connection inference → PlantUML
 ```
 
 ### Launcher scripts
@@ -110,6 +112,7 @@ All phases are run from `brio_pipeline/` with short commands:
 | Command | What it does |
 |---------|--------------|
 | `./slow.sh 113 114 115` | Annotate samples with the slow pipeline |
+| `./train_classifier.sh` | Train the component visual classifier (run once before slow pipeline) |
 | `./labels.sh` | Export YOLO labels from completed samples |
 | `./calibrate.sh 113` | Build fixed camera rig calibration |
 | `./train.sh` | Train YOLOv8n |
@@ -129,12 +132,15 @@ Logs are written automatically on every run.
 │
 ├── brio_pipeline/          ← both pipelines + launcher scripts
 │   ├── README.md           ← full pipeline documentation
-│   ├── slow.sh / infer.sh / train.sh / ...
+│   ├── slow.sh / train_classifier.sh / infer.sh / train.sh / ...
 │   ├── brio_3d_pipeline/   ← slow annotation pipeline (source code)
 │   │   ├── pipeline.py
 │   │   ├── config.py
 │   │   ├── backprojector.py
 │   │   ├── classifier.py
+│   │   ├── component_classifier.py   ← MobileNetV3-small visual classifier
+│   │   ├── component_map.py
+│   │   ├── component_classifier.pth  ← trained weights (git-ignored)
 │   │   └── ...
 │   └── brio_fast_pipeline/ ← fast inference pipeline
 │       ├── infer.py
@@ -144,7 +150,7 @@ Logs are written automatically on every run.
 └── sam_trials/             ← earlier SAM integration experiments
 ```
 
-> **Note:** `brio_pipeline/brio_3d_pipeline/outputs/` (DUSt3R/SAM caches, ~37 MB per sample) is excluded from git via `.gitignore`. Run `./slow.sh <sample_ids>` to regenerate.
+> **Note:** `brio_pipeline/brio_3d_pipeline/outputs/` (DUSt3R/SAM caches, ~37 MB per sample) and `component_classifier.pth` are excluded from git via `.gitignore`. Run `./train_classifier.sh` once to produce the weights, then `./slow.sh <sample_ids>` to regenerate outputs.
 
 ---
 
@@ -153,6 +159,7 @@ Logs are written automatically on every run.
 - Python 3.10, conda env `brio-3d`
 - PyTorch + CUDA 12.4 (`cu124`) on RTX 2070 Super (8 GB)
 - DUSt3R (ViT-L, `07-dust3r/`), SAM ViT-B, YOLOv8n (ultralytics)
+- MobileNetV3-small (torchvision, ImageNet pretrained)
 - WSL2 on Windows 11
 
 Setup instructions: [brio_pipeline/README.md § Environment Setup](brio_pipeline/README.md#10-environment-setup)
@@ -165,3 +172,4 @@ Setup instructions: [brio_pipeline/README.md § Environment Setup](brio_pipeline
 2. Kirillov et al. (2023) — *Segment Anything*
 3. Jocher et al. (2023) — *Ultralytics YOLOv8*
 4. Liu et al. (2022) — *PETR: Position Embedding Transformation for Multi-View 3D Object Detection*
+5. Howard et al. (2019) — *Searching for MobileNetV3*

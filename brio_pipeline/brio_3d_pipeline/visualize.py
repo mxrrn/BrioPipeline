@@ -19,14 +19,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import config as cfg
 
+
+def _resolve_run_dir(run_arg: str | None) -> Path:
+    """Return the run directory to visualize.
+
+    If run_arg is given, look it up directly under OUTPUTS_ROOT.
+    Otherwise pick the most recently created run_* folder.
+    """
+    if run_arg:
+        d = cfg.OUTPUTS_ROOT / run_arg
+        if not d.exists():
+            raise FileNotFoundError(f"Run directory not found: {d}")
+        return d
+    candidates = sorted(
+        [d for d in cfg.OUTPUTS_ROOT.iterdir()
+         if d.is_dir() and d.name.startswith("run_")],
+        key=lambda d: d.stat().st_mtime,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No run_* directories found in {cfg.OUTPUTS_ROOT}")
+    return candidates[-1]
+
 COLORS = [
     "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
     "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
 ]
 
 
-def visualize_sample(sample_id: int):
-    out_dir       = cfg.OUTPUTS_ROOT / f"sample_{sample_id}"
+def visualize_sample(sample_id: int, run_dir: Path):
+    out_dir       = run_dir / f"sample_{sample_id}"
     results_path  = out_dir / "results.json"
     proposals_dir = out_dir / "proposals"
 
@@ -75,5 +96,10 @@ def visualize_sample(sample_id: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample", type=int, default=113)
+    parser.add_argument("--run",    type=str, default=None,
+                        help="Run folder name (e.g. run_001_20260526_2123). "
+                             "Defaults to the most recent run_* folder.")
     args = parser.parse_args()
-    visualize_sample(args.sample)
+    run_dir = _resolve_run_dir(args.run)
+    print(f"[Viz3D] Using run: {run_dir.name}")
+    visualize_sample(args.sample, run_dir)

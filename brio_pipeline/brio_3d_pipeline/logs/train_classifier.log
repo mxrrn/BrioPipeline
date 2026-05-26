@@ -1,0 +1,44 @@
+Downloading: "https://download.pytorch.org/models/mobilenet_v3_small-047dcff4.pth" to /home/mxrn/.cache/torch/hub/checkpoints/mobilenet_v3_small-047dcff4.pth
+[Classifier] Dataset: 1804 images, 29 classes
+  0%|          | 0.00/9.83M [00:00<?, ?B/s] 10%|█         | 1.00M/9.83M [00:00<00:00, 10.4MB/s] 20%|██        | 2.00M/9.83M [00:00<00:01, 4.53MB/s] 33%|███▎      | 3.25M/9.83M [00:00<00:01, 6.64MB/s] 46%|████▌     | 4.50M/9.83M [00:00<00:00, 8.14MB/s] 58%|█████▊    | 5.75M/9.83M [00:00<00:00, 9.26MB/s] 71%|███████   | 7.00M/9.83M [00:00<00:00, 10.0MB/s] 83%|████████▎ | 8.12M/9.83M [00:00<00:00, 10.5MB/s] 94%|█████████▍| 9.25M/9.83M [00:01<00:00, 10.9MB/s]100%|██████████| 9.83M/9.83M [00:01<00:00, 9.21MB/s]
+Epoch   1/40  loss=2.9152  train_acc=0.212  val_acc=0.096  *
+Epoch   2/40  loss=2.0437  train_acc=0.461  val_acc=0.152  *
+Epoch   3/40  loss=1.7207  train_acc=0.566  val_acc=0.256  *
+Epoch   4/40  loss=1.5756  train_acc=0.615  val_acc=0.507  *
+Epoch   5/40  loss=1.4404  train_acc=0.671  val_acc=0.704  *
+Epoch   6/40  loss=1.4053  train_acc=0.697  val_acc=0.652
+Epoch   7/40  loss=1.3855  train_acc=0.695  val_acc=0.581
+Epoch   8/40  loss=1.3155  train_acc=0.724  val_acc=0.770  *
+Epoch   9/40  loss=1.3170  train_acc=0.715  val_acc=0.796  *
+Epoch  10/40  loss=1.2161  train_acc=0.774  val_acc=0.756
+Epoch  11/40  loss=1.2118  train_acc=0.765  val_acc=0.730
+Epoch  12/40  loss=1.2202  train_acc=0.742  val_acc=0.774
+Epoch  13/40  loss=1.2151  train_acc=0.757  val_acc=0.796  *
+Epoch  14/40  loss=1.1689  train_acc=0.782  val_acc=0.693
+Epoch  15/40  loss=1.1936  train_acc=0.757  val_acc=0.578
+Epoch  16/40  loss=1.1080  train_acc=0.799  val_acc=0.811  *
+Epoch  17/40  loss=1.1411  train_acc=0.799  val_acc=0.774
+Epoch  18/40  loss=1.1069  train_acc=0.811  val_acc=0.685
+Epoch  19/40  loss=1.1195  train_acc=0.795  val_acc=0.859  *
+Epoch  20/40  loss=1.1072  train_acc=0.804  val_acc=0.730
+Epoch  21/40  loss=1.0721  train_acc=0.823  val_acc=0.859  *
+Epoch  22/40  loss=1.0838  train_acc=0.811  val_acc=0.859  *
+Epoch  23/40  loss=1.0711  train_acc=0.815  val_acc=0.796
+Epoch  24/40  loss=1.0765  train_acc=0.827  val_acc=0.833
+Epoch  25/40  loss=1.0484  train_acc=0.836  val_acc=0.885  *
+Epoch  26/40  loss=1.0233  train_acc=0.849  val_acc=0.852
+Epoch  27/40  loss=1.0375  train_acc=0.836  val_acc=0.907  *
+Epoch  28/40  loss=1.0156  train_acc=0.842  val_acc=0.911  *
+Epoch  29/40  loss=1.0260  train_acc=0.848  val_acc=0.904
+Epoch  30/40  loss=1.0245  train_acc=0.836  val_acc=0.911  *
+Epoch  31/40  loss=0.9912  train_acc=0.851  val_acc=0.919  *
+Epoch  32/40  loss=1.0122  train_acc=0.844  val_acc=0.919  *
+Epoch  33/40  loss=1.0195  train_acc=0.841  val_acc=0.933  *
+Epoch  34/40  loss=1.0065  train_acc=0.851  val_acc=0.907
+Epoch  35/40  loss=1.0026  train_acc=0.851  val_acc=0.915
+Epoch  36/40  loss=1.0083  train_acc=0.851  val_acc=0.926
+Epoch  37/40  loss=0.9993  train_acc=0.864  val_acc=0.922
+Epoch  38/40  loss=0.9903  train_acc=0.857  val_acc=0.926
+Epoch  39/40  loss=0.9964  train_acc=0.849  val_acc=0.919
+Epoch  40/40  loss=0.9812  train_acc=0.871  val_acc=0.922
+[Classifier] Training done. Best val_acc=0.933  → /mnt/c/BA/00-project/brio_pipeline/brio_3d_pipeline/component_classifier.pth

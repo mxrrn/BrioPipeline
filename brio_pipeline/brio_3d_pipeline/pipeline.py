@@ -19,6 +19,7 @@ Usage
 import sys
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path("/mnt/c/BA/07-dust3r")))
@@ -30,32 +31,45 @@ from puml_parser   import find_puml, parse_puml
 from preprocessor  import compute_global_halfsize, crop_images
 from dust3r_runner import run_dust3r
 from sam_runner    import run_sam_on_images
-from backprojector import compute_proposals
-from classifier    import assign_classes
+from backprojector          import compute_proposals
+from classifier             import assign_classes
+from component_classifier   import ComponentClassifier
+
+
+# ── Run directory ────────────────────────────────────────────────────────────
+
+def _make_run_dir() -> Path:
+    """Create and return a new timestamped run folder inside OUTPUTS_ROOT.
+
+    Folder format: run_NNN_YYYYMMDD_HHMM
+    The run number (NNN) is one more than the number of existing run_* dirs.
+    """
+    cfg.OUTPUTS_ROOT.mkdir(parents=True, exist_ok=True)
+    existing = [d for d in cfg.OUTPUTS_ROOT.iterdir()
+                if d.is_dir() and d.name.startswith("run_")]
+    run_num  = len(existing) + 1
+    stamp    = datetime.now().strftime("%Y%m%d_%H%M")
+    run_dir  = cfg.OUTPUTS_ROOT / f"run_{run_num:03d}_{stamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 
 # ── Image selection ───────────────────────────────────────────────────────────
 
 def collect_images(sample_id: int) -> list[Path]:
     """
-    Multi-elevation composite:
-      - All 8 images from Images90 (top-down, best XY separation)
-      - Every 4th image from Images45 (6 images, full azimuth coverage)
-    Total: 14 images.
+    Sample every 3rd image (stride=3, skip 2 between each) from every
+    available elevation folder: Images30, Images45, Images60, Images90.
+    Missing folders are silently skipped.
     """
     base = cfg.MULTI_VIEW / f"Sample_{sample_id}"
     imgs = []
-
-    # Images90 — all available (typically 8)
-    ring90 = sorted((base / "Images90").glob("*.jpg")) + \
-             sorted((base / "Images90").glob("*.JPG"))
-    imgs.extend(ring90)
-
-    # Images45 — every 4th to get ~6 evenly-spaced azimuth samples
-    ring45 = sorted((base / "Images45").glob("*.jpg")) + \
-             sorted((base / "Images45").glob("*.JPG"))
-    imgs.extend(ring45[::4])
-
+    for elev in ["Images30", "Images45", "Images60", "Images90"]:
+        folder = base / elev
+        if not folder.exists():
+            continue
+        ring = sorted(folder.glob("*.jpg")) + sorted(folder.glob("*.JPG"))
+        imgs.extend(ring[::4])
     if not imgs:
         raise FileNotFoundError(f"No images found for sample {sample_id}")
     return imgs
@@ -63,7 +77,22 @@ def collect_images(sample_id: int) -> list[Path]:
 
 # ── Per-sample processing ─────────────────────────────────────────────────────
 
-def process_sample(sample_id: int, fixed_half: int, device: str) -> dict:
+def _load_classifier(device: str) -> ComponentClassifier | None:
+    """Load component visual classifier if weights exist, otherwise return None."""
+    if not cfg.CLASSIFIER_WEIGHTS.exists():
+        print(f"[Classifier] No weights at {cfg.CLASSIFIER_WEIGHTS} — visual assignment disabled")
+        return None
+    try:
+        clf = ComponentClassifier(cfg.CLASSIFIER_WEIGHTS, device=device)
+        print(f"[Classifier] Loaded from {cfg.CLASSIFIER_WEIGHTS}")
+        return clf
+    except Exception as exc:
+        print(f"[Classifier] Failed to load ({exc}) — visual assignment disabled")
+        return None
+
+
+def process_sample(sample_id: int, fixed_half: int, device: str,
+                   run_dir: Path, classifier: ComponentClassifier | None = None) -> dict:
     print(f"\n{'='*60}")
     print(f" Sample {sample_id}")
     print(f"{'='*60}")
@@ -73,15 +102,23 @@ def process_sample(sample_id: int, fixed_half: int, device: str) -> dict:
     print(f"[PUML] {manifest.n_components} components: {manifest.class_list}")
 
     raw_img_paths = collect_images(sample_id)
-    print(f"[Images] {len(raw_img_paths)} images "
-          f"(Images90: {sum(1 for p in raw_img_paths if 'Images90' in str(p))}, "
-          f"Images45: {sum(1 for p in raw_img_paths if 'Images45' in str(p))})")
+    folder_counts: dict[str, int] = {}
+    for p in raw_img_paths:
+        folder_counts[p.parent.name] = folder_counts.get(p.parent.name, 0) + 1
+    count_str = ", ".join(f"{k}: {v}" for k, v in sorted(folder_counts.items()))
+    print(f"[Images] {len(raw_img_paths)} images ({count_str})")
 
-    out_dir  = cfg.OUTPUTS_ROOT / f"sample_{sample_id}"
+    out_dir  = run_dir / f"sample_{sample_id}"
     crop_dir = out_dir / "cropped"
 
     # ── Fixed-scale crop ─────────────────────────────────────────────────
     img_paths = crop_images(raw_img_paths, crop_dir, fixed_half=fixed_half)
+
+    # Save ordered image list so the visualizer uses the same sequence as
+    # SAM and DUSt3R (which index into img_paths by position)
+    (out_dir / "image_order.json").write_text(
+        json.dumps([str(p) for p in img_paths], indent=2)
+    )
 
     # ── DUSt3R ──────────────────────────────────────────────────────────
     dust3r_result = run_dust3r(
@@ -98,14 +135,16 @@ def process_sample(sample_id: int, fixed_half: int, device: str) -> dict:
     )
 
     # ── Back-projection + clustering ─────────────────────────────────────
-    proposals = compute_proposals(
+    proposals, visual_cls = compute_proposals(
         dust3r_result, sam_masks, manifest.n_components,
         out_dir / "proposals",
-        image_paths=img_paths,       # passed for colour extraction
+        image_paths=img_paths,
+        classifier=classifier,
+        conf_thresh=cfg.CLASSIFIER_CONF_THRESH,
     )
 
     # ── Classification ───────────────────────────────────────────────────
-    results = assign_classes(proposals, manifest.components)
+    results = assign_classes(proposals, manifest.components, visual_cls=visual_cls)
 
     # ── Report ───────────────────────────────────────────────────────────
     print(f"\n[Results] Sample {sample_id}")
@@ -147,6 +186,13 @@ def main():
     label = "samples_" + "_".join(str(s) for s in args.samples)
     setup_logging(label)
 
+    # ── Create timestamped run directory ──────────────────────────────────
+    run_dir = _make_run_dir()
+    print(f"[Run] Output directory: {run_dir}")
+
+    # ── Load visual classifier (optional) ────────────────────────────────
+    classifier = _load_classifier(args.device)
+
     # ── Pre-pass: compute global fixed crop size ──────────────────────────
     print("[Pre-pass] Computing global crop scale across all samples...")
     all_raw = [collect_images(sid) for sid in args.samples]
@@ -154,9 +200,10 @@ def main():
 
     # ── Main pass: process each sample ───────────────────────────────────
     for sid, raw_paths in zip(args.samples, all_raw):
-        process_sample(sid, fixed_half=fixed_half, device=args.device)
+        process_sample(sid, fixed_half=fixed_half, device=args.device,
+                       run_dir=run_dir, classifier=classifier)
 
-    print("\nAll samples processed.")
+    print(f"\nAll samples processed → {run_dir}")
 
 
 if __name__ == "__main__":

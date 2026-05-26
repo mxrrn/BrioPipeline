@@ -81,14 +81,25 @@ def _colour_feature(cls: str) -> np.ndarray:
 
 def assign_classes(proposals   : list[np.ndarray],
                    manifest_components: list,
-                   colour_weight: float = 1.5) -> list["InstanceResult"]:
+                   visual_cls  : list[str | None] | None = None,
+                   colour_weight: float = 1.5,
+                   visual_mismatch_penalty: float = 8.0,
+                   ) -> list["InstanceResult"]:
     """
     Assign each 3D proposal cloud to a PUML-declared component instance.
 
+    Cost matrix priority (highest to lowest):
+      1. Visual classifier vote (if available and confident): large penalty on mismatch
+      2. Colour prototype distance: L2 between proposal cluster HSV and class prototype
+      3. Geometry: not used (no per-class geometry prototypes available)
+
     Args:
-        proposals           : list of N (M_i, 3) point clouds
-        manifest_components : list of Component(cls, instance_id) from puml_parser
-        colour_weight       : multiplier on colour term vs geometry term
+        proposals               : list of N (M_i, 3) point clouds
+        manifest_components     : list of Component(cls, instance_id) from puml_parser
+        visual_cls              : list of N dominant visual class codes (from backprojector),
+                                  None entries mean no confident prediction for that cluster
+        colour_weight           : weight for colour distance term
+        visual_mismatch_penalty : cost added when visual_cls disagrees with manifest cls
 
     Returns list of N InstanceResult.
     """
@@ -96,31 +107,22 @@ def assign_classes(proposals   : list[np.ndarray],
     assert n == len(manifest_components), \
         f"Proposal count {n} ≠ manifest count {len(manifest_components)}"
 
-    # Proposal features
-    geo_props  = np.array([_geo_features(p)    for p in proposals])   # (N, 5)
-    # Colour of proposal: median centroid colour is not directly available here,
-    # but backprojector already baked it into clustering; we use geo only for
-    # assignment and rely on colour having already guided cluster formation.
-    # For cost matrix we additionally compare against class colour prototypes.
-    col_props  = np.zeros((n, 3), np.float32)   # placeholder — colour already used
+    have_visual = (visual_cls is not None and any(v is not None for v in visual_cls))
+    col_mfst    = np.array([_colour_feature(c.cls) for c in manifest_components])  # (N, 3)
 
-    # Manifest prototype features
-    geo_mfst   = np.array([_geo_features(p)    for p in proposals])   # same shape trick:
-    # We compare each proposal's geometry to the known class geometry prototype.
-    col_mfst   = np.array([_colour_feature(c.cls) for c in manifest_components])  # (N,3)
-
-    # Build cost matrix: rows=proposals, cols=manifest entries
-    # Geometry cost: L2 in geo space
-    # Colour cost  : L1 between proposal cluster colour centroid (from backprojector)
-    #                and manifest class colour prototype
     cost = np.zeros((n, n), np.float32)
     for pi in range(n):
-        pts = proposals[pi]
-        g_p = geo_props[pi]
         for mi, comp in enumerate(manifest_components):
-            g_cost = float(np.linalg.norm(g_p - _geo_features(pts)))
-            c_cost = float(np.linalg.norm(_colour_feature(comp.cls)))  # distance to prototype
-            cost[pi, mi] = g_cost + colour_weight * c_cost
+            # Colour prototype distance
+            c_cost = float(np.linalg.norm(_colour_feature(comp.cls) - col_mfst[mi]))
+
+            # Visual mismatch penalty
+            v_penalty = 0.0
+            if visual_cls is not None and visual_cls[pi] is not None:
+                if visual_cls[pi] != comp.cls:
+                    v_penalty = visual_mismatch_penalty
+
+            cost[pi, mi] = colour_weight * c_cost + v_penalty
 
     row_ind, col_ind = linear_sum_assignment(cost)
 
@@ -131,6 +133,9 @@ def assign_classes(proposals   : list[np.ndarray],
         lo   = pts.min(0) if len(pts) > 0 else np.zeros(3)
         hi   = pts.max(0) if len(pts) > 0 else np.zeros(3)
         cen  = np.median(pts, axis=0).astype(np.float32) if len(pts) > 0 else np.zeros(3)
+        vis  = visual_cls[pi] if visual_cls is not None else None
+        print(f"  [Assign] cluster {pi} → {comp.instance_id}"
+              + (f"  (visual={vis})" if vis else ""))
         results[pi] = InstanceResult(
             instance_id = comp.instance_id,
             cls         = comp.cls,

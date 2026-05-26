@@ -19,7 +19,7 @@ BATCH_112_150  = CONSTRUCTIONS / "Sample_112_to_150"
 IMAGE_ELEVATION   = "Images45"      # which elevation ring to use
 DUST3R_SIZE       = 512             # image resize for DUSt3R encoder
 DUST3R_BATCH      = 1              # pairs per forward pass (keep at 1 for 8 GB VRAM)
-DUST3R_NITER      = 300            # global alignment iterations
+DUST3R_NITER      = 100            # global alignment iterations
 SAM_MODEL_TYPE    = "vit_b"        # vit_b fits safely in 8 GB alongside DUSt3R outputs
 SAM_POINTS_SIDE   = 16             # automatic mask generator grid density
 SAM_IOU_THRESH    = 0.80           # minimum predicted IoU to keep a mask
@@ -30,3 +30,8 @@ DUST3R_SCENE_GRAPH = "complete"   # all N*(N-1)/2 pairs
 AUTO_CROP_PADDING  = 0.20         # padding fraction around the LCC bounding box
 
 DEVICE = "cuda"   # set to "cpu" as fallback if CUDA fails
+
+# ── Component visual classifier ─────────────────────────────────────────────
+COMPONENT_DATASET    = Path("/mnt/c/Users/mjmer/OneDrive/Desktop/Work/ISSE/BRIO Constructuion/new_structure_Component")
+CLASSIFIER_WEIGHTS   = PROJECT_ROOT / "component_classifier.pth"
+CLASSIFIER_CONF_THRESH = 0.40   # minimum confidence to trust a visual prediction

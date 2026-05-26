@@ -22,7 +22,7 @@ FOLDER_TO_CLASS = {
     "platewood33":   "plwo33",
     "platewood53":   "plwo53",
     "plug":          "pl",
-    "rodlong":       "ro_lo",
+    "rodlong":       "rolo",
     "rodmedium":     "rome",
     "rodsmall":      "rosm",
     "screwlong":     "sclo",

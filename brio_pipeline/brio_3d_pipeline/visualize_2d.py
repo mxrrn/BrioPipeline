@@ -22,6 +22,27 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config as cfg
 
 
+def _resolve_run_dir(run_arg: str | None) -> Path:
+    """Return the run directory to visualize.
+
+    If run_arg is given, look it up directly under OUTPUTS_ROOT.
+    Otherwise pick the most recently created run_* folder.
+    """
+    if run_arg:
+        d = cfg.OUTPUTS_ROOT / run_arg
+        if not d.exists():
+            raise FileNotFoundError(f"Run directory not found: {d}")
+        return d
+    candidates = sorted(
+        [d for d in cfg.OUTPUTS_ROOT.iterdir()
+         if d.is_dir() and d.name.startswith("run_")],
+        key=lambda d: d.stat().st_mtime,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No run_* directories found in {cfg.OUTPUTS_ROOT}")
+    return candidates[-1]
+
+
 # ── Colour palette (one per instance, BGR) ───────────────────────────────────
 
 _PALETTE = [
@@ -127,8 +148,8 @@ def make_legend(instance_ids: list[str], width: int, row_h: int = 24) -> np.ndar
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def visualize_2d(sample_id: int, max_views: int = 8) -> Path:
-    out_dir    = cfg.OUTPUTS_ROOT / f"sample_{sample_id}"
+def visualize_2d(sample_id: int, run_dir: Path, max_views: int = 8) -> Path:
+    out_dir    = run_dir / f"sample_{sample_id}"
     results_path = out_dir / "results.json"
     dust3r_path  = out_dir / "dust3r" / "dust3r_cache.pkl"
     sam_dir      = out_dir / "sam"
@@ -147,7 +168,16 @@ def visualize_2d(sample_id: int, max_views: int = 8) -> Path:
         sam_masks = pickle.load(f)
 
     pts3d_all = dust3r["pts3d"]          # list of (H, W, 3)
-    img_paths = sorted(crop_dir.glob("*.jpg")) + sorted(crop_dir.glob("*.JPG"))
+
+    # Use the pipeline's original image order so that img_paths[i] matches
+    # sam_masks[i] and pts3d_all[i] — a simple alphabetical sort is wrong
+    # when images come from multiple elevation folders with colliding names.
+    order_file = out_dir / "image_order.json"
+    if order_file.exists():
+        with open(order_file) as f:
+            img_paths = [Path(p) for p in json.load(f)]
+    else:
+        img_paths = sorted(crop_dir.glob("*.jpg")) + sorted(crop_dir.glob("*.JPG"))
 
     instance_ids      = [inst["instance_id"] for inst in results["instances"]]
     instance_centroids = [np.array(inst["centroid"], np.float32)
@@ -215,7 +245,12 @@ def visualize_2d(sample_id: int, max_views: int = 8) -> Path:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="2D instance overlay visualisation")
     parser.add_argument("--sample",    type=int, required=True)
+    parser.add_argument("--run",       type=str, default=None,
+                        help="Run folder name (e.g. run_001_20260526_2123). "
+                             "Defaults to the most recent run_* folder.")
     parser.add_argument("--max-views", type=int, default=8,
                         help="Max number of views to include in the grid (default 8)")
     args = parser.parse_args()
-    visualize_2d(args.sample, args.max_views)
+    run_dir = _resolve_run_dir(args.run)
+    print(f"[Viz2D] Using run: {run_dir.name}")
+    visualize_2d(args.sample, run_dir, args.max_views)

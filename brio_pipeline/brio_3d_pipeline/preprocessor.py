@@ -119,7 +119,10 @@ def crop_images(image_paths: list[Path], output_dir: Path,
                 fixed_half: int) -> list[Path]:
     """
     Crop all images to a fixed square of side 2*fixed_half centred on each
-    image's own LCC centroid.  Results are cached.
+    image's own LCC centroid, then downscale to half resolution.  Cached.
+
+    Output filename includes the source folder name as a prefix to avoid
+    collisions when different elevation folders share the same filename.
 
     Args:
         image_paths : original image paths
@@ -129,30 +132,42 @@ def crop_images(image_paths: list[Path], output_dir: Path,
     Returns list of cropped image paths (same order as input).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    marker = output_dir / f"half_{fixed_half}.txt"
+    # marker name encodes both the crop size and the half-res flag so that
+    # switching from an old full-res cache forces a clean regeneration
+    marker = output_dir / f"half_{fixed_half}_r50.txt"
 
-    cropped_paths = [output_dir / p.name for p in image_paths]
+    # prefix each output filename with its source elevation folder to prevent
+    # collisions (e.g. Images90/IMG_001.jpg → Images90_IMG_001.jpg)
+    cropped_paths = [output_dir / f"{p.parent.name}_{p.name}" for p in image_paths]
     if marker.exists() and all(cp.exists() for cp in cropped_paths):
-        print(f"[Crop] Using cached {2*fixed_half}×{2*fixed_half} crops from {output_dir}")
+        out_side = fixed_half  # saved at half resolution → side = fixed_half
+        print(f"[Crop] Using cached {out_side}×{out_side} crops from {output_dir}")
         return cropped_paths
 
-    # Clear stale crops from a different half-size
+    # Clear stale crops from a different half-size or resolution setting
     for f in output_dir.glob("*.jpg"):
+        f.unlink()
+    for f in output_dir.glob("*.JPG"):
         f.unlink()
     for f in output_dir.glob("half_*.txt"):
         f.unlink()
 
-    print(f"[Crop] Cropping {len(image_paths)} images → {2*fixed_half}×{2*fixed_half} px")
+    out_side = fixed_half  # after halving: 2*fixed_half / 2 = fixed_half
+    print(f"[Crop] Cropping {len(image_paths)} images → {out_side}×{out_side} px (half-res)")
 
     for p, out_path in zip(image_paths, cropped_paths):
         img  = cv2.imread(str(p))
+        if img is None:
+            continue
         info = _lcc_info(img)
         if info:
             cx, cy = info["cx"], info["cy"]
         else:
-            # Fallback: image centre
             cx, cy = img.shape[1] / 2, img.shape[0] / 2
         cropped = _crop_image_fixed(img, cx, cy, fixed_half)
+        # Downscale to half resolution for faster inference
+        h, w = cropped.shape[:2]
+        cropped = cv2.resize(cropped, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
         cv2.imwrite(str(out_path), cropped)
 
     marker.write_text(str(fixed_half))

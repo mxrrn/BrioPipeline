@@ -4,7 +4,7 @@ This directory contains two pipelines and a set of launcher scripts:
 
 | Pipeline | Purpose | Runtime |
 |---|---|---|
-| `brio_3d_pipeline/` | Slow annotation pipeline. Produces 3D ground-truth labels and training data. | ~35 min/sample (cold) |
+| `brio_3d_pipeline/` | Slow annotation pipeline. Produces 3D ground-truth labels and training data. | ~35 min/sample (cold), ~2 min (cached) |
 | `brio_fast_pipeline/` | Fast inference. Trained YOLOv8 + fixed-rig triangulation. | < 2 seconds/sample |
 
 The slow pipeline runs once per sample to produce training labels. The fast pipeline trains on those labels and then runs on unseen samples.
@@ -21,11 +21,17 @@ All phases are launched from `brio_pipeline/` using the shell scripts below. Run
 cd /mnt/c/BA/00-project/brio_pipeline
 ```
 
+### Phase 0 — Train the component visual classifier (once)
+```bash
+./train_classifier.sh
+```
+Trains MobileNetV3-small on the isolated component dataset (~40 epochs, ~10 min on GPU). Weights are saved to `brio_3d_pipeline/component_classifier.pth` and loaded automatically by the slow pipeline. Only needs to run once; retrain if the component dataset changes.
+
 ### Phase 1 — Annotate samples (slow pipeline)
 ```bash
 ./slow.sh 113 114 115 116 117
 ```
-Runs DUSt3R + SAM + clustering on the listed samples. Logs to `brio_3d_pipeline/logs/`.
+Runs CLAHE → DUSt3R → SAM → clustering → visual classification on the listed samples. Each run creates a new timestamped folder `outputs/run_NNN_YYYYMMDD_HHMM/`. Logs to `brio_3d_pipeline/logs/`.
 
 ### Phase 2 — Export training labels
 ```bash
@@ -71,9 +77,10 @@ With a ground-truth PUML (tells the model the expected per-class instance counts
 
 ### Visualise slow-pipeline results
 ```bash
-./visualize.sh 113
+./visualize.sh 113          # auto-selects latest run
+./visualize.sh 113 run_002_20260527_0012   # specific run
 ```
-Produces `brio_3d_pipeline/outputs/sample_113/viz_3d.png`.
+Produces `viz_3d.png` and `viz_2d.png` in the run's sample folder.
 
 ---
 
@@ -84,7 +91,8 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 | Script | Arguments | What it does |
 |--------|-----------|--------------|
 | `slow.sh` | `<sample_ids...> [--device cpu]` | Slow pipeline: annotate samples |
-| `visualize.sh` | `<sample_id>` | Plot 3D instance clouds for one sample |
+| `train_classifier.sh` | `[--epochs N] [--batch N] [--lr F]` | Train the component visual classifier |
+| `visualize.sh` | `<sample_id> [<run_name>]` | Plot 3D/2D instance clouds for one sample |
 | `labels.sh` | `[<sample_ids...>]` | Export YOLO labels from completed samples |
 | `calibrate.sh` | `<sample_ids...>` | Build fixed camera rig calibration |
 | `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n on exported dataset |
@@ -97,41 +105,49 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 ```
 00-project/
 │
-└── brio_pipeline/      # Both pipelines + launchers
-    ├── slow.sh             # Launcher: slow annotation pipeline
-    ├── visualize.sh        # Launcher: 3D visualisation
-    ├── labels.sh           # Launcher: YOLO label export
-    ├── calibrate.sh        # Launcher: camera rig calibration
-    ├── train.sh            # Launcher: YOLOv8 training
-    ├── infer.sh            # Launcher: fast inference
-    ├── README.md           # This file
+└── brio_pipeline/              # Both pipelines + launchers
+    ├── slow.sh
+    ├── train_classifier.sh     # Train component visual classifier
+    ├── visualize.sh
+    ├── labels.sh
+    ├── calibrate.sh
+    ├── train.sh
+    ├── infer.sh
+    ├── README.md               # This file
+    ├── CHANGELOG.md            # Change log (reverse chronological)
     ├── 260520-brio-3d-pipeline-setup-guide.md
     │
-    ├── brio_3d_pipeline/   # Slow pipeline
-    │   ├── pipeline.py     # Entry point
-    │   ├── config.py       # Paths and settings
-    │   ├── logger.py       # Automatic logging
+    ├── brio_3d_pipeline/       # Slow pipeline
+    │   ├── pipeline.py         # Entry point
+    │   ├── config.py           # Paths and settings
+    │   ├── logger.py           # Automatic logging
     │   ├── puml_parser.py
     │   ├── preprocessor.py
     │   ├── dust3r_runner.py
-    │   ├── sam_runner.py
-    │   ├── backprojector.py
-    │   ├── classifier.py
-    │   ├── component_map.py
+    │   ├── sam_runner.py       # CLAHE pre-processing + SAM
+    │   ├── backprojector.py    # Back-projection, clustering, visual votes
+    │   ├── classifier.py       # Hungarian assignment (visual + colour)
+    │   ├── component_classifier.py  # MobileNetV3-small classifier
+    │   ├── component_map.py    # Folder→code mapping + HSV prototypes
+    │   ├── component_classifier.pth  # Trained weights (git-ignored)
     │   ├── visualize.py
-    │   ├── logs/           # Auto-created; one .log per run
+    │   ├── visualize_2d.py
+    │   ├── logs/               # Auto-created; one .log per run
     │   └── outputs/
-    │       └── sample_N/
-    │           ├── cropped/
-    │           ├── dust3r/dust3r_cache.pkl
-    │           ├── sam/sam_masks_topN.pkl
-    │           ├── proposals/proposals_NX_v3.pkl
-    │           ├── results.json
-    │           └── viz_3d.png
+    │       └── run_NNN_YYYYMMDD_HHMM/   # Timestamped run folder
+    │           └── sample_N/
+    │               ├── image_order.json
+    │               ├── cropped/
+    │               ├── dust3r/dust3r_cache.pkl
+    │               ├── sam/sam_masks_topN.pkl
+    │               ├── proposals/proposals_NX_v4.pkl
+    │               ├── results.json
+    │               ├── viz_3d.png
+    │               └── viz_2d.png
     │
-    └── brio_fast_pipeline/ # Fast pipeline
+    └── brio_fast_pipeline/     # Fast pipeline
         ├── config.py
-        ├── logger.py       # Automatic logging
+        ├── logger.py
         ├── label_exporter.py
         ├── calibrator.py
         ├── detector.py
@@ -140,9 +156,9 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
         ├── puml_generator.py
         ├── train.py
         ├── infer.py
-        ├── logs/           # Auto-created; one .log per run
+        ├── logs/
         ├── calibration/rig_poses.pkl
-        ├── dataset/        # YOLO-format training data
+        ├── dataset/            # YOLO-format training data
         └── outputs/
             └── sample_N/
                 ├── predicted.puml
@@ -153,20 +169,13 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 
 ## Logging
 
-Every entry-point script (`pipeline.py`, `label_exporter.py`, `calibrator.py`, `train.py`, `infer.py`) calls `setup_logging()` at startup. This redirects all `print()` output and stderr to a timestamped file while keeping terminal output intact.
+Every entry-point script calls `setup_logging()` at startup. This redirects all `print()` output and stderr to a timestamped file while keeping terminal output intact.
 
 Log file naming: `YYYYMMDD_HHMMSS_<label>.log`
 
-Examples:
-```
-brio_3d_pipeline/logs/20260520_142301_samples_113_114_115.log
-brio_fast_pipeline/logs/20260520_222902_calibrate.log
-brio_fast_pipeline/logs/20260521_093012_infer_sample120.log
-```
-
 To follow a run live:
 ```bash
-tail -f brio_3d_pipeline/logs/20260520_142301_samples_113_114_115.log
+tail -f brio_3d_pipeline/logs/20260527_001200_samples_113_114.log
 ```
 
 ---
@@ -182,7 +191,8 @@ tail -f brio_3d_pipeline/logs/20260520_142301_samples_113_114_115.log
    - 3.4 [DUSt3R — 3D Reconstruction](#34-dust3r--3d-reconstruction)
    - 3.5 [SAM — 2D Segmentation](#35-sam--2d-segmentation)
    - 3.6 [Back-Projection + Clustering](#36-back-projection--clustering)
-   - 3.7 [Classification — Hungarian Assignment](#37-classification--hungarian-assignment)
+   - 3.7 [Component Visual Classifier](#37-component-visual-classifier)
+   - 3.8 [Classification — Hungarian Assignment](#38-classification--hungarian-assignment)
 4. [Output Format](#4-output-format)
 5. [What to Expect from Inference](#5-what-to-expect-from-inference)
 6. [Known Limitations](#6-known-limitations)
@@ -211,29 +221,34 @@ The pipeline's job is to take those photographs and produce a labelled 3D point 
 PlantUML file
      │
      ▼
-[1] PUML Parser ──────► N components + class list
+[1] PUML Parser ──────────► N components + class list
      │
      ▼
-[2] Image Collection ──► 14 images per sample
-     │                   (8 × Images90 + 6 × Images45)
+[2] Image Collection ──────► ~20 images per sample
+     │                       (all 4 elevation rings, every 4th image)
      ▼
-[3] Auto-Crop ──────────► Fixed-scale 2N×2N px square crops
-     │                    (largest construction in batch sets scale)
+[3] Auto-Crop ─────────────► Fixed-scale half-resolution square crops
+     │                       (largest construction in batch sets scale)
      ▼
-[4] DUSt3R ─────────────► pts3d[H×W×3] per image (world-space 3D)
-     │                    + camera poses + intrinsics
+[4] DUSt3R ────────────────► pts3d[H×W×3] per image (world-space 3D)
+     │                       + camera poses + intrinsics
      ▼
-[5] SAM ────────────────► Top-N binary masks per image
-     │
+[5] SAM ───────────────────► Top-N binary masks per image
+     │  (CLAHE contrast boost applied before mask generation)
      ▼
-[6] Back-Projection ────► 14×N raw 3D point clouds
+[6] Back-Projection ────────► ~20N raw 3D point clouds
      │  Ward Agglomerative Clustering (6D geometry+colour)
      │  Sigma cleanup (O(n) outlier removal)
-     └──────────────────► N merged, cleaned instance clouds
-     │
+     │  Visual classifier → per-mask class prediction
+     │  Majority vote per cluster → visual_cls per cluster
+     └──────────────────────► N merged, cleaned instance clouds
+     │                        + dominant visual class per cluster
      ▼
-[7] Classifier ─────────► Hungarian assignment → class label per cloud
-     │
+[7] Visual Classifier ──────► MobileNetV3-small predicts class
+     │  (trained on isolated component images, 93.3% val acc)
+     ▼
+[8] Hungarian Assignment ───► visual mismatch penalty + colour cost
+     │                        → class label per cloud
      ▼
 results.json  (instance_id, cls, n_points, centroid, bbox_size)
 ```
@@ -252,7 +267,6 @@ The PlantUML file for each sample declares what components are physically presen
 object "blwo11_1 : Component" as blwo111
 object "nu_1 : Component" as nu1
 object "nu_2 : Component" as nu2
-...
 ```
 
 `parse_puml()` extracts the class code and instance number from every `object` line via regex, producing a `SampleManifest` with:
@@ -262,20 +276,24 @@ object "nu_2 : Component" as nu2
 
 This manifest drives every subsequent stage: N controls how many SAM masks to keep, how many clusters to produce, and how many assignment slots exist.
 
-**What can go wrong:** If the PUML uses a class code not in the vocabulary (e.g. `stwo3` vs `stwo3-9`), the colour lookup in the classifier will return zeros for that class. The geometry assignment still works; only colour-guided cost is weakened.
-
 ---
 
 ### 3.2 Image Collection
 
 **File:** `pipeline.py` → `collect_images()`
 
-| Ring | Images used | Reason |
-|------|-------------|--------|
-| Images90 (top-down) | All 8 available | Best XY separation — sees the footprint of every component from above |
-| Images45 (45° elevation) | Every 4th → ~6 images | Adds Z/height information; full 360° azimuth coverage with minimal overlap |
+Every 4th image is taken from each available elevation ring:
 
-**Total: ~14 images per sample.** Using all 78 images would produce 78×77/2 = 3,003 DUSt3R pairs and take hours. 14 images gives 91 pairs and runs in ~4 minutes.
+| Ring | Typical count | Geometric value |
+|------|--------------|-----------------|
+| Images30 (30° elevation) | ~6 | Wide-angle side views; good for tall components |
+| Images45 (45° elevation) | ~6 | Diagonal views; best overall depth cues |
+| Images60 (60° elevation) | ~6 | Near-top views; good for flat components |
+| Images90 (top-down) | ~6 | Pure top-down; best XY separation |
+
+**Total: ~20 images per sample** (missing rings are silently skipped). This gives ~190 DUSt3R pairs and provides uniform azimuth coverage at all elevations — critical for correctly reconstructing non-flat constructions.
+
+Always run the full intended sample set together — the pre-pass computes a global pixel scale from all samples, so adding or removing samples changes the crop.
 
 ---
 
@@ -289,11 +307,16 @@ Each image is binarised (pixels below 245 in all channels = foreground). Morphol
 **Step 2 — Fixed global scale:**
 The pre-pass scans every image across all samples in the batch and finds the largest LCC half-size. All samples are cropped to that same square with 20% padding.
 
-This guarantees **1 pixel = the same physical length** across every sample in the batch. Without it, a small 3-part construction would appear at 3× the zoom of a large 7-part one, making DUSt3R depth estimates and SAM mask areas incomparable.
+**Step 3 — Half-resolution resize:**
+After cropping, each image is downsampled by 50% using `cv2.INTER_AREA`. This halves disk I/O and pre-processing time while preserving enough detail for SAM and DUSt3R.
 
-**Always run the full intended sample set together** — running a single sample alone gives a different pixel scale from a batch run.
+**Step 4 — Filename collision prevention:**
+Images from different elevation folders (e.g. `Images90/IMG_001.jpg` and `Images45/IMG_001.jpg`) share filenames. The output filename is prefixed with the source folder: `Images90_IMG_001.jpg`, `Images45_IMG_001.jpg`.
 
-**Output:** `cropped/half_N.txt` marker + one JPG per image at `2N × 2N` px.
+**Step 5 — Image order preservation:**
+The ordered list of cropped paths is written to `image_order.json` so that the visualiser uses exactly the same sequence as SAM and DUSt3R.
+
+This guarantees **1 pixel = the same physical length** across every sample in the batch.
 
 ---
 
@@ -306,18 +329,18 @@ DUSt3R is an uncalibrated multi-view stereo model. It predicts dense 3D geometry
 
 **What it produces:**
 
-- **`pts3d`** — the most important output: `(H, W, 3)` per image, each pixel containing its estimated 3D world-space position. A dense point cloud aligned across all views.
+- **`pts3d`** — the most important output: `(H, W, 3)` per image, each pixel containing its estimated 3D world-space position.
 - `poses` — `(N, 4, 4)` camera-to-world matrices.
 - `intrinsics` — `(N, 3, 3)` estimated focal lengths and principal points.
 - `depths` — `(H, W)` depth maps per image.
 
 **How it works:**
 1. All `N*(N-1)/2` image pairs are processed through the pairwise encoder-decoder.
-2. `global_aligner` (300 iterations) jointly optimises all poses and depth maps so overlapping regions agree.
+2. `global_aligner` (100 iterations) jointly optimises all poses and depth maps so overlapping regions agree. The loss converges by iteration ~100; additional iterations give negligible improvement.
 
-**VRAM usage:** ViT-L encoder + 14 images × 91 pairs is the tightest stage. `batch_size=1` keeps it within 8 GB.
+**VRAM usage:** ViT-L encoder + ~20 images × 190 pairs. `batch_size=1` keeps it within 8 GB.
 
-**Runtime:** ~4 minutes (first run). Subsequent runs load from `dust3r_cache.pkl`.
+**Runtime:** ~41 seconds per sample (optimised from ~25 min with 300 iterations). Subsequent runs load from `dust3r_cache.pkl`.
 
 **Key note:** DUSt3R operates in an arbitrary scale and coordinate system. Centroids are in unitless world space, not millimetres. Relative values within one sample are meaningful; absolute values and cross-sample comparisons are not.
 
@@ -328,6 +351,9 @@ DUSt3R is an uncalibrated multi-view stereo model. It predicts dense 3D geometry
 **File:** `sam_runner.py`  
 **Model:** SAM ViT-B (`sam_vit_b_01ec64.pth`, ~375 MB VRAM)
 
+**CLAHE pre-processing:**
+Before SAM sees each image, CLAHE (Contrast Limited Adaptive Histogram Equalization) is applied in LAB colour space: only the L (lightness) channel is equalised (clipLimit=2.0, tile 8×8). This boosts local contrast for white components against white backgrounds without altering colour information.
+
 SAM generates candidate 2D binary masks in **automatic mode**: a 16×16 grid of prompt points is placed over each image and the decoder produces one mask per prompt.
 
 **Filtering:**
@@ -336,9 +362,9 @@ SAM generates candidate 2D binary masks in **automatic mode**: a 16×16 grid of 
 - `min_mask_region_area = 200 px` — discard tiny fragments
 
 **Top-N selection:**
-After filtering, only the **top N** masks (by predicted IoU) are kept, where N comes from the PUML manifest. This is the pipeline's only use of the ground-truth label count.
+After filtering, only the **top N** masks (by predicted IoU) are kept, where N comes from the PUML manifest.
 
-**Runtime:** ~115 seconds per image on GPU. With 14 images: ~27 minutes — the dominant bottleneck. Results are cached in `sam_masks_topN.pkl`.
+**Runtime:** ~115 seconds per image on GPU. With ~20 images: ~38 minutes — the dominant bottleneck. Results are cached in `sam_masks_topN.pkl`.
 
 ---
 
@@ -353,7 +379,7 @@ For each image and each of its N SAM masks, the mask directly indexes into `pts3
 pts = pts3d_frame[mask]   # shape: (M, 3)
 ```
 
-No camera matrix multiply, no depth conversion — the mask selects pre-computed world-space points. Each cloud is capped at 5,000 points at extraction time to bound memory usage.
+No camera matrix multiply, no depth conversion — the mask selects pre-computed world-space points. Each cloud is capped at 5,000 points at extraction time.
 
 **Feature vector per cloud:**
 ```
@@ -363,32 +389,57 @@ feature = [centroid_x, centroid_y, centroid_z,   ← 3D median centroid
 Both blocks are independently normalised to unit standard deviation.
 
 **Ward Agglomerative Clustering:**
-All `14N` clouds are clustered into exactly **N** groups using `AgglomerativeClustering(linkage="ward")`. Ward linkage minimises within-cluster variance at each merge — a globally optimal assignment that correctly groups cross-view observations of the same component even when components are touching.
+All `~20N` clouds are clustered into exactly **N** groups using `AgglomerativeClustering(linkage="ward")`. Ward linkage minimises within-cluster variance at each merge.
 
 **Sigma cleanup:**
-After merging, outlier points are removed using a O(n) sigma filter: points farther than `mean + 2.5σ` of the distance distribution from the cluster median are discarded. This replaces DBSCAN, which caused multi-GB OOM on large merged clusters in WSL2.
+After merging, outlier points are removed: points farther than `mean + 2.5σ` from the cluster median are discarded.
 
-**Output:** N clean float32 arrays `(M_i, 3)` — one per declared component instance.
+**Visual prediction per mask:**
+If a trained `ComponentClassifier` is available, each SAM mask crop is extracted from the CLAHE-enhanced image and classified. Crops smaller than 32×32 px are skipped (too pixelated). Predictions below the confidence threshold (default 0.40) are discarded.
+
+**Majority vote per cluster:**
+After clustering, the most common confident visual prediction among all masks in each cluster becomes that cluster's `visual_cls`. This is passed to the assignment stage.
+
+**Output:** N clean float32 arrays `(M_i, 3)` + N visual class codes (or None).
 
 ---
 
-### 3.7 Classification — Hungarian Assignment
+### 3.7 Component Visual Classifier
 
-**File:** `classifier.py`  
-**Reference colour data:** `component_map.py`
+**File:** `component_classifier.py`  
+**Dataset:** `new_structure_Component/` — 1,804 isolated component images, 29 classes, 4 elevation sub-folders per class  
+**Architecture:** MobileNetV3-small (ImageNet pretrained, fine-tuned)  
+**Accuracy:** 93.3% validation accuracy (29-class, held-out 15% split)
 
-The N proposal clouds are matched to the N PUML-declared components in a one-to-one assignment.
+The classifier is trained once with `./train_classifier.sh` and its weights (`component_classifier.pth`) are loaded automatically by the pipeline at startup.
+
+**Training details:**
+- Heavy augmentation: RandomResizedCrop, horizontal/vertical flip, ColorJitter, label smoothing
+- AdamW optimiser, CosineAnnealingLR over 40 epochs
+- Input: 224×224 RGB, ImageNet normalisation
+
+**Inference:** Given a BGR crop of a SAM mask region, returns `(cls_code, confidence)`. Used by the back-projector to vote class labels per cluster.
+
+**Small component behaviour:** Components like nuts, washers, and screws are often small in-scene. When the crop is below 32×32 px or confidence is below 0.40, no visual vote is cast — Hungarian assignment handles these via colour prototype fallback.
+
+---
+
+### 3.8 Classification — Hungarian Assignment
+
+**File:** `classifier.py`
+
+The N proposal clouds are matched to the N PUML-declared components in a one-to-one optimal assignment.
 
 **Cost matrix:**
 
 ```
-cost[i, j] = geometry_cost + 1.5 × colour_cost
+cost[i, j] = colour_weight × colour_cost + visual_mismatch_penalty
 ```
 
-- **Geometry cost** — L2 distance between the proposal's geometry feature vector and the class prior.
-- **Colour cost** — L2 distance between the proposal's mean HSV and the reference colour prototype for class `j`. Prototypes are extracted from `02-resources/data/component_images/`.
+- **Colour cost** — L2 distance between HSV colour prototypes (from `component_map.py`). Prototypes are extracted from the component image dataset.
+- **Visual mismatch penalty** — if the visual classifier predicted a class for cluster `i` and it disagrees with manifest entry `j`, a penalty of 8.0 is added. This is the dominant signal when visual predictions are available.
 
-**`scipy.linear_sum_assignment`** (Hungarian algorithm) minimises total cost across all N pairs simultaneously.
+**`scipy.linear_sum_assignment`** (Hungarian algorithm) minimises total cost across all N pairs simultaneously. Assignment decisions are printed per cluster for inspection.
 
 **Output:** N `InstanceResult` objects with `instance_id`, `cls`, `n_points`, `centroid`, `bbox_size`.
 
@@ -396,7 +447,7 @@ cost[i, j] = geometry_cost + 1.5 × colour_cost
 
 ## 4. Output Format
 
-`brio_3d_pipeline/outputs/sample_N/results.json`:
+Each run creates `outputs/run_NNN_YYYYMMDD_HHMM/sample_N/results.json`:
 
 ```json
 {
@@ -423,39 +474,43 @@ cost[i, j] = geometry_cost + 1.5 × colour_cost
 | `centroid` | Median (x, y, z) in DUSt3R world space |
 | `bbox_size` | Axis-aligned bounding box extents (dx, dy, dz) |
 
+Run directories are numbered sequentially (`run_001`, `run_002`, …). The visualiser auto-selects the most recent run when no `--run` argument is given.
+
 ---
 
 ## 5. What to Expect from Inference
 
 ### Typical run (cold — no cache)
 
-| Stage | Time (GPU, 14 images) |
+| Stage | Time (GPU, ~20 images) |
 |-------|-----------------------|
 | Pre-pass crop | ~2 min |
-| DUSt3R | ~4 min |
-| SAM | ~27 min |
-| Back-projection + clustering | ~1 min |
-| Classification | < 1 sec |
-| **Total per sample** | **~35 min** |
+| DUSt3R | ~41 sec |
+| SAM | ~38 min |
+| Back-projection + clustering + visual classification | ~2 min |
+| Hungarian assignment | < 1 sec |
+| **Total per sample** | **~43 min** |
 
 ### With cache
 
-DUSt3R and SAM caches are reused on re-runs. A cached run (backprojector + classifier only) takes under 2 minutes per sample.
+DUSt3R and SAM caches are reused on re-runs. A cached run (back-projector + classifier only) takes under 2 minutes per sample.
 
 ### Result quality
 
 **Good separation** (geometrically distinct components like plates + rods + nuts):
 - Each instance cloud has a clearly distinct centroid position.
 - `n_points` varies by size — a large plate might have 2–3M points; a small nut 100–200k.
+- Visual classifier confirms the assignment with high confidence for large/distinctive parts.
 
 **Difficult cases:**
 - Components of the same class stacked or touching — Ward clustering may merge them.
-- Small components partially occluded in all views — SAM may filter their masks.
-- Components with very similar colour prototypes — colour cost contributes little.
+- Small components (nuts, washers, screws < 32 px crop) — visual classifier abstains; colour fallback applies.
+- Components with very similar colour — colour cost contributes little; visual vote dominates.
+- White components on white backgrounds — mitigated by CLAHE, but may still produce weak SAM masks.
 
 ### What the 3D positions mean
 
-Centroid coordinates are in DUSt3R's arbitrary world-space (not metres). Do not compare centroid values across samples — the coordinate system is re-initialised for each run.
+Centroid coordinates are in DUSt3R's arbitrary world-space (not metres). Do not compare centroid values across samples.
 
 ---
 
@@ -463,13 +518,11 @@ Centroid coordinates are in DUSt3R's arbitrary world-space (not metres). Do not 
 
 | Limitation | Effect | Status |
 |------------|--------|--------|
-| `stwo3` vs `stwo3-9` class code mismatch | Colour prototype lookup returns zeros for that class | Needs PUML regex / component_map alignment |
 | Single-sample scale | Crop scale differs from batch run | Always run the full intended sample set together |
-| Duplicate image filenames | Images90 and Images45 share filenames; one overwrites the other in cropped/ | Manifests as DUSt3R seeing the same image twice |
 | No metric scale | Centroid/bbox units are DUSt3R arbitrary | Cannot directly compare sizes across samples |
 | SAM top-N assumption | Assumes the N best SAM masks correspond to the N physical components | Fails if one component produces no confident mask |
-| `conda run` overhead | OOM kill on WSL2 | Fixed: launcher scripts use direct Python binary |
-| Large cluster OOM | DBSCAN on million-point clusters caused multi-GB RSS spikes | Fixed: sigma cleanup + 5k-per-cloud cap |
+| Small component visual classification | Crops < 32 px skip classifier; confidence < 0.40 casts no vote | Fallback to colour prototype; generally correct for fasteners since they're often unique in the manifest |
+| Domain gap (classifier) | Trained on isolated white-background images; inference on scene crops | Mitigated by CLAHE and heavy augmentation; 93.3% val acc in practice |
 
 ---
 
@@ -479,14 +532,15 @@ Every expensive stage writes a cache file. The pipeline checks for these at star
 
 | Cache file | Stage | Notes |
 |------------|-------|-------|
-| `cropped/half_N.txt` | Preprocessor | Regenerate if sample batch changes |
-| `dust3r/dust3r_cache.pkl` | DUSt3R | Tied to the cropped images; delete if crop changes |
+| `cropped/half_N_r50.txt` | Preprocessor | Regenerate if sample batch or resolution changes |
+| `dust3r/dust3r_cache.pkl` | DUSt3R | Tied to the cropped images; delete if crops change |
 | `sam/sam_masks_topN.pkl` | SAM | N baked into filename; component count change triggers re-run |
-| `proposals/proposals_NX_v3.pkl` | Back-projection | Delete to force re-cluster |
+| `proposals/proposals_NX_v4.pkl` | Back-projection (no visual) | Delete to force re-cluster |
+| `proposals/proposals_NX_v4_vis.pkl` | Back-projection (with visual) | Separate cache when classifier is active |
 
 To clear all caches for a sample:
 ```bash
-rm -rf brio_3d_pipeline/outputs/sample_114/
+rm -rf brio_3d_pipeline/outputs/run_NNN_YYYYMMDD_HHMM/sample_114/
 ```
 
 ---
@@ -498,7 +552,7 @@ rm -rf brio_3d_pipeline/outputs/sample_114/
 | Parameter | Default | Effect |
 |-----------|---------|--------|
 | `DUST3R_SIZE` | `512` | Max image dimension fed to DUSt3R encoder |
-| `DUST3R_NITER` | `300` | Global alignment iterations |
+| `DUST3R_NITER` | `100` | Global alignment iterations (loss converges by ~100) |
 | `DUST3R_BATCH` | `1` | Pairs per forward pass — keep at 1 for 8 GB VRAM |
 | `SAM_MODEL_TYPE` | `"vit_b"` | SAM encoder size |
 | `SAM_POINTS_SIDE` | `16` | Grid density for automatic mask generation |
@@ -507,6 +561,9 @@ rm -rf brio_3d_pipeline/outputs/sample_114/
 | `SAM_MIN_AREA` | `200` | Minimum mask area in pixels |
 | `AUTO_CROP_PADDING` | `0.20` | Padding around the LCC bounding box |
 | `DEVICE` | `"cuda"` | Set to `"cpu"` as fallback |
+| `COMPONENT_DATASET` | *(OneDrive path)* | Root of the isolated component image dataset |
+| `CLASSIFIER_WEIGHTS` | `component_classifier.pth` | MobileNetV3-small checkpoint |
+| `CLASSIFIER_CONF_THRESH` | `0.40` | Minimum confidence to trust a visual prediction |
 
 `brio_fast_pipeline/config.py`:
 
@@ -540,7 +597,7 @@ rm -rf brio_3d_pipeline/outputs/sample_114/
 | `platewood33` | `plwo33` | Wooden plate 3×3 |
 | `platewood53` | `plwo53` | Wooden plate 5×3 |
 | `plug` | `pl` | Plug connector |
-| `rodlong` | `ro_lo` | Long rod |
+| `rodlong` | `rolo` | Long rod |
 | `rodmedium` | `rome` | Medium rod |
 | `rodsmall` | `rosm` | Short rod |
 | `screwlong` | `sclo` | Long screw |
@@ -577,7 +634,7 @@ pip install -r /mnt/c/BA/07-dust3r/requirements.txt
 pip install git+https://github.com/facebookresearch/segment-anything.git
 
 # Core dependencies
-pip install opencv-python scikit-learn scipy matplotlib
+pip install opencv-python scikit-learn scipy matplotlib pillow
 
 # Fast pipeline (YOLO)
 pip install ultralytics
@@ -593,6 +650,8 @@ wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth \
 ```
 
 **DUSt3R model weights** download automatically from HuggingFace on first use (~1.1 GB).
+
+**Component classifier weights** are produced by running `./train_classifier.sh` once (~10 min).
 
 **Always use the direct Python binary** — not `conda run`. The launcher scripts do this automatically. If running Python directly:
 ```bash
@@ -616,10 +675,10 @@ Calibration time (runs once):
   calibrate.sh  →  brio_fast_pipeline/calibration/rig_poses.pkl
 
 Inference time (< 2 seconds per sample):
-  14 images
-    ↓  detector.py    — YOLOv8 detection (~700ms)
+  ~20 images
+    ↓  detector.py     — YOLOv8 detection (~700ms)
     ↓  triangulator.py — DLT triangulation (~5ms)
-    ↓  connector.py   — proximity + slot rules (~1ms)
+    ↓  connector.py    — proximity + slot rules (~1ms)
     ↓  puml_generator.py (~1ms)
   brio_fast_pipeline/outputs/sample_N/predicted.puml
   brio_fast_pipeline/outputs/sample_N/results.json
@@ -644,7 +703,7 @@ Inference time (< 2 seconds per sample):
 
 A component occluded in most views is triangulated from the views where it is visible. The DLT solver uses all views that detect the class and finds the least-squares best 3D position. Even two non-adjacent views give an accurate triangulation because the camera geometry is known precisely from the fixed rig.
 
-This is fundamentally stronger than monocular depth estimation (Option B): depth from a single image is ambiguous, especially for the flat-background BRIO setup. Known multi-view geometry is exact.
+This is fundamentally stronger than monocular depth estimation (Option B): depth from a single image is ambiguous, especially for the flat-background BRIO setup.
 
 ### Switching to Option B later
 
