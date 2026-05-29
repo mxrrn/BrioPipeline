@@ -67,7 +67,9 @@ def visualize_sample(sample_id: int, run_dir: Path):
     proposals_file = candidates[-1]
 
     with open(proposals_file, "rb") as f:
-        proposals = pickle.load(f)
+        raw = pickle.load(f)
+    # v4+ cache returns (clouds, visual_cls) tuple; earlier versions return list directly
+    proposals = raw[0] if isinstance(raw, tuple) else raw
 
     fig = plt.figure(figsize=(12, 8))
     ax  = fig.add_subplot(111, projection="3d")
