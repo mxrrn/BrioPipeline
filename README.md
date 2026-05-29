@@ -1,6 +1,6 @@
 # From Multi-View 2D to 3D Object Detection and Structure Generation in PlantUML
 
-**Bachelor's Thesis:** 3D Object Detection from Multi-View 2D Input Images of Multi-Component Constructions and Knowledge-Aware Structure Diagram Generation in PlantUML
+**Bachelor's Thesis:** From Multi-View Images to Instance Diagrams: A Multi-View Detection Pipeline for Structural Relationship Inference in Small Assemblies
 
 ---
 
