@@ -8,16 +8,18 @@ Improvements over v1
 * Feature vector = [3D median centroid (3) + mean HSV colour (3)] with
   independent normalisation so colour and geometry contribute equally.
 * Agglomerative clustering (Ward, n_clusters=N) — globally optimal.
-* Sigma cleanup per cluster (O(n), no tree) — WSL2 OOM-safe.
+* DBSCAN cleanup per cluster: adaptive eps from bbox diagonal, discards
+  isolated noise points without assuming a Gaussian distribution.
 * Optional ComponentClassifier: predicts the class of each SAM mask crop,
   then majority-votes per cluster to produce a visual class label.
+  All crops are batched into a single GPU forward pass for speed.
 """
 import pickle
 import numpy as np
 import cv2
 from pathlib import Path
 from collections import Counter
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import AgglomerativeClustering, DBSCAN
 
 # Same CLAHE settings as sam_runner — keeps classifier crops visually consistent
 # with what SAM saw when generating the masks.
@@ -72,15 +74,29 @@ def _mean_hsv(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return (mean / np.array([180., 255., 255.])).astype(np.float32)
 
 
-def _sigma_cleanup(pts: np.ndarray, n_sigma: float = 2.5) -> np.ndarray:
-    """O(n) outlier removal: discard points beyond mean+n_sigma*std distance from median."""
-    if len(pts) < 10:
+def _dbscan_cleanup(pts: np.ndarray,
+                    eps_frac: float = 0.05,
+                    min_samples: int = 5) -> np.ndarray:
+    """
+    Remove outlier points using DBSCAN: keep only the largest dense cluster.
+
+    eps is set adaptively as eps_frac × bounding-box diagonal so the threshold
+    auto-scales with the physical size of the construction, removing the need to
+    tune an absolute distance.  Points labelled -1 (noise) are discarded.
+    If DBSCAN marks everything as noise the original cloud is returned unchanged.
+    """
+    if len(pts) < min_samples * 2:
         return pts
-    centre = np.median(pts, axis=0)
-    dists  = np.linalg.norm(pts - centre, axis=1)
-    thresh = np.mean(dists) + n_sigma * np.std(dists)
-    keep   = dists <= thresh
-    return pts[keep].astype(np.float32) if keep.sum() > 0 else pts
+    diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+    eps  = max(diag * eps_frac, 1e-4)
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(pts)
+    core_mask = labels != -1
+    if not core_mask.any():
+        return pts  # all labelled noise — nothing to remove
+    unique, counts = np.unique(labels[core_mask], return_counts=True)
+    main_label = unique[counts.argmax()]
+    kept = pts[labels == main_label].astype(np.float32)
+    return kept if len(kept) >= min_samples else pts
 
 
 # ── Main API ──────────────────────────────────────────────────────────────────
@@ -92,7 +108,7 @@ def compute_proposals(dust3r_result: dict,
                       image_paths: list[Path] | None = None,
                       classifier=None,
                       conf_thresh: float = 0.40,
-                      ) -> tuple[list[np.ndarray], list[str | None]]:
+                      ) -> tuple[list[np.ndarray], list[str | None], list[np.ndarray]]:
     """
     SAM masks × DUSt3R pts3d → N merged + cleaned 3D instance point clouds.
 
@@ -105,13 +121,14 @@ def compute_proposals(dust3r_result: dict,
         classifier         : optional ComponentClassifier for visual voting
         conf_thresh        : minimum confidence to accept a visual prediction
 
-    Returns (clouds, visual_cls):
-        clouds     : list of N (M_i, 3) world-space float32 arrays
-        visual_cls : list of N dominant visual class codes (or None per cluster)
+    Returns (clouds, visual_cls, cluster_colours):
+        clouds          : list of N (M_i, 3) world-space float32 arrays
+        visual_cls      : list of N dominant visual class codes (or None per cluster)
+        cluster_colours : list of N mean HSV (3,) float32 arrays in [0,1]
     """
     use_visual = classifier is not None
     cache_suffix = "_vis" if use_visual else ""
-    cache_file = output_dir / f"proposals_N{n_components}_v4{cache_suffix}.pkl"
+    cache_file = output_dir / f"proposals_N{n_components}_v5{cache_suffix}.pkl"
     if cache_file.exists():
         print(f"[Backproject] Loading cached proposals from {cache_file}")
         with open(cache_file, "rb") as f:
@@ -128,12 +145,14 @@ def compute_proposals(dust3r_result: dict,
     all_clouds    : list[np.ndarray]  = []
     all_centroids : list[np.ndarray]  = []   # 3D centroid (3,)
     all_colours   : list[np.ndarray]  = []   # mean HSV   (3,)
-    all_visual_cls: list[str | None]  = []   # per-mask visual prediction
+    all_visual_cls: list[str | None]  = []   # per-mask visual prediction (filled after batch)
+
+    # Crop collection for batched classifier inference
+    pending_crops : list[np.ndarray] = []   # BGR crops awaiting prediction
+    pending_idx   : list[int]        = []   # index into all_clouds for each crop
 
     for img_idx, (masks, p3d) in enumerate(zip(sam_masks_per_image, pts3d_all)):
         # Load image for colour and visual extraction (once per image).
-        # Apply CLAHE so the classifier sees the same contrast-enhanced image
-        # that SAM used when generating these masks.
         bgr, img_rgb = None, None
         if use_colour and img_idx < len(image_paths):
             bgr = cv2.imread(str(image_paths[img_idx]))
@@ -147,22 +166,28 @@ def compute_proposals(dust3r_result: dict,
             if len(pts) < 20:
                 continue
 
+            cloud_idx = len(all_clouds)
             all_clouds.append(pts)
             all_centroids.append(_median_centroid(pts))
             colour = _mean_hsv(img_rgb, seg) if img_rgb is not None else np.zeros(3, np.float32)
             all_colours.append(colour)
+            all_visual_cls.append(None)  # placeholder — filled below
 
-            # Visual prediction for this mask crop.
-            # Skip if the crop is too small (<32 px on shortest side) — the
-            # classifier can't extract meaningful features from a pixelated patch.
-            vis_cls = None
+            # Collect crop for batched inference.
+            # Skip if crop too small (<32 px shortest side).
             if use_visual and bgr is not None:
                 crop = crop_from_mask(bgr, seg)
                 if crop is not None and min(crop.shape[:2]) >= 32:
-                    pred_cls, pred_conf = classifier.predict(crop)
-                    if pred_conf >= conf_thresh:
-                        vis_cls = pred_cls
-            all_visual_cls.append(vis_cls)
+                    pending_crops.append(crop)
+                    pending_idx.append(cloud_idx)
+
+    # ── Batched visual inference ──────────────────────────────────────────
+    if use_visual and pending_crops:
+        print(f"[Backproject] Running classifier on {len(pending_crops)} crops (batched)")
+        batch_preds = classifier.predict_batch(pending_crops)
+        for cloud_idx, (pred_cls, pred_conf) in zip(pending_idx, batch_preds):
+            if pred_conf >= conf_thresh:
+                all_visual_cls[cloud_idx] = pred_cls
 
     if len(all_clouds) < n_components:
         print(f"[Backproject] WARNING: only {len(all_clouds)} valid clouds for "
@@ -193,30 +218,37 @@ def compute_proposals(dust3r_result: dict,
         n_clusters=n_components, metric="euclidean", linkage="ward"
     ).fit_predict(feat)
 
-    # ── Merge + sigma cleanup + visual majority vote ──────────────────────
+    # ── Merge + DBSCAN cleanup + visual majority vote ─────────────────────
     merged: list[np.ndarray] = []
     visual_cls_per_cluster: list[str | None] = []
+    cluster_colours: list[np.ndarray] = []
 
     for cid in range(n_components):
         idx   = np.where(labels == cid)[0]
         raw   = np.concatenate([all_clouds[i] for i in idx], axis=0) \
                 if len(idx) else np.empty((0, 3), np.float32)
-        clean = _sigma_cleanup(raw)
+        clean = _dbscan_cleanup(raw)
         merged.append(clean)
+
+        # Per-cluster mean observed HSV (used by classifier for colour matching)
+        if len(idx):
+            cluster_colours.append(colours_arr[idx].mean(axis=0))
+        else:
+            cluster_colours.append(np.zeros(3, np.float32))
 
         # Majority visual vote for this cluster
         votes = [all_visual_cls[i] for i in idx if all_visual_cls[i] is not None]
         dominant = Counter(votes).most_common(1)[0][0] if votes else None
         visual_cls_per_cluster.append(dominant)
 
-    print(f"[Backproject] Results after sigma cleanup:")
+    print(f"[Backproject] Results after DBSCAN cleanup:")
     for i, (pts, vcls) in enumerate(zip(merged, visual_cls_per_cluster)):
         c = _median_centroid(pts)
         print(f"  Cluster {i}: {len(pts):>7d} pts | "
               f"centroid ({c[0]:+.4f}, {c[1]:+.4f}, {c[2]:+.4f})"
               + (f"  visual={vcls}" if vcls else ""))
 
-    result = (merged, visual_cls_per_cluster)
+    result = (merged, visual_cls_per_cluster, cluster_colours)
     with open(cache_file, "wb") as f:
         pickle.dump(result, f)
     print(f"[Backproject] Cached to {cache_file}")

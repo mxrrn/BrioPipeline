@@ -2,15 +2,17 @@
 Classify 3D instance proposals against the PUML component manifest using
 Hungarian assignment on a combined geometry + colour feature vector.
 
-Geometry features
-─────────────────
-Extracted from the 3D point cloud: longest axis, axis ratios, log-volume.
-
 Colour features
 ───────────────
-Mean HSV extracted from the reference component images in
-02-resources/data/component_images/.  This is far more reliable than
-hardcoded approximate values.
+Per-cluster observed mean HSV (from backprojector) is compared against
+per-class prototype HSV built from reference images in
+02-resources/data/component_images/.  This L2 distance forms the colour cost.
+
+Visual classifier
+─────────────────
+When the ComponentClassifier has made a confident prediction for a cluster,
+any manifest entry whose class disagrees incurs a large fixed penalty,
+making the visual vote the dominant assignment signal.
 
 Assignment
 ──────────
@@ -19,7 +21,7 @@ across all N proposal → manifest pairings.  No greedy local decisions.
 """
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -30,24 +32,6 @@ class InstanceResult:
     n_points    : int
     centroid    : np.ndarray   # (3,) world coords
     bbox_size   : np.ndarray   # (3,) axis-aligned extents
-
-
-# ── Geometry features ─────────────────────────────────────────────────────────
-
-def _geo_features(pts: np.ndarray) -> np.ndarray:
-    """[log_vol, longest_axis, ratio_2, ratio_3, log_n_pts]"""
-    if len(pts) < 3:
-        return np.zeros(5, np.float32)
-    lo, hi    = pts.min(0), pts.max(0)
-    extents   = np.sort(hi - lo)[::-1]           # descending
-    vol       = float(np.prod(np.maximum(extents, 1e-6)))
-    return np.array([
-        np.log1p(vol),
-        extents[0],
-        extents[1] / (extents[0] + 1e-6),
-        extents[2] / (extents[0] + 1e-6),
-        np.log1p(len(pts)),
-    ], np.float32)
 
 
 # ── Colour prototypes from reference images ───────────────────────────────────
@@ -82,6 +66,7 @@ def _colour_feature(cls: str) -> np.ndarray:
 def assign_classes(proposals   : list[np.ndarray],
                    manifest_components: list,
                    visual_cls  : list[str | None] | None = None,
+                   cluster_colours: list[np.ndarray] | None = None,
                    colour_weight: float = 1.5,
                    visual_mismatch_penalty: float = 8.0,
                    ) -> list["InstanceResult"]:
@@ -90,7 +75,7 @@ def assign_classes(proposals   : list[np.ndarray],
 
     Cost matrix priority (highest to lowest):
       1. Visual classifier vote (if available and confident): large penalty on mismatch
-      2. Colour prototype distance: L2 between proposal cluster HSV and class prototype
+      2. Colour distance: L2 between observed cluster HSV and class prototype HSV
       3. Geometry: not used (no per-class geometry prototypes available)
 
     Args:
@@ -98,6 +83,8 @@ def assign_classes(proposals   : list[np.ndarray],
         manifest_components     : list of Component(cls, instance_id) from puml_parser
         visual_cls              : list of N dominant visual class codes (from backprojector),
                                   None entries mean no confident prediction for that cluster
+        cluster_colours         : list of N mean observed HSV (3,) arrays in [0,1],
+                                  used to compute colour distance to class prototypes
         colour_weight           : weight for colour distance term
         visual_mismatch_penalty : cost added when visual_cls disagrees with manifest cls
 
@@ -107,14 +94,16 @@ def assign_classes(proposals   : list[np.ndarray],
     assert n == len(manifest_components), \
         f"Proposal count {n} ≠ manifest count {len(manifest_components)}"
 
-    have_visual = (visual_cls is not None and any(v is not None for v in visual_cls))
-    col_mfst    = np.array([_colour_feature(c.cls) for c in manifest_components])  # (N, 3)
+    have_colour = cluster_colours is not None
 
     cost = np.zeros((n, n), np.float32)
     for pi in range(n):
+        obs_hsv = cluster_colours[pi] if have_colour else None
         for mi, comp in enumerate(manifest_components):
-            # Colour prototype distance
-            c_cost = float(np.linalg.norm(_colour_feature(comp.cls) - col_mfst[mi]))
+            proto = _colour_feature(comp.cls)
+
+            # L2 distance between observed cluster HSV and class prototype
+            c_cost = float(np.linalg.norm(obs_hsv - proto)) if obs_hsv is not None else 0.0
 
             # Visual mismatch penalty
             v_penalty = 0.0

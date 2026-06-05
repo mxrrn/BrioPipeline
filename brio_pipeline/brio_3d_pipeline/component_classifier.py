@@ -14,38 +14,8 @@ import cv2
 from pathlib import Path
 from collections import Counter
 
-# ── Folder name → PUML class code ────────────────────────────────────────────
-FOLDER_TO_CODE: dict[str, str] = {
-    "blockwood11":    "blwo11",
-    "blockwood21":    "blwo21",
-    "bolt":           "bo",
-    "nose":           "no",
-    "nut":            "nu",
-    "plateplastic53": "plpl53",
-    "platewood21":    "plwo21",
-    "platewood31":    "plwo31",
-    "platewood33":    "plwo33",
-    "platewood53":    "plwo53",
-    "plug":           "pl",
-    "rodlong":        "rolo",
-    "rodmedium":      "rome",
-    "rodsmall":       "rosm",
-    "screwlong":      "sclo",
-    "screwmedium":    "scme",
-    "screwsmall":     "scsm",
-    "sleeve":         "sl",
-    "strapplastic5":  "stpl5",
-    "strapwood3":     "stwo3",
-    "strapwood4":     "stwo4",
-    "strapwood5":     "stwo5",
-    "strapwood6":     "stwo6",
-    "strapwood7":     "stwo7",
-    "strapwood9":     "stwo9",
-    "tire":           "ti",
-    "washer":         "wa",
-    "wheelred":       "whre",
-    "wheelwhite":     "whwh",
-}
+# ── Folder name → PUML class code (single source of truth in component_map) ──
+from component_map import FOLDER_TO_CLASS as FOLDER_TO_CODE
 
 CLASSES = sorted(set(FOLDER_TO_CODE.values()))
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
@@ -250,7 +220,7 @@ class ComponentClassifier:
         import torch.nn as nn
         from torchvision import transforms, models
 
-        ckpt   = torch.load(str(weights_path), map_location=device)
+        ckpt   = torch.load(str(weights_path), map_location=device, weights_only=True)
         n_cls  = ckpt["n_cls"]
         self._classes = ckpt["classes"]
 
@@ -278,6 +248,23 @@ class ComponentClassifier:
             probs = torch.softmax(self._model(tensor), dim=1)[0]
             idx   = int(probs.argmax())
         return self._classes[idx], float(probs[idx])
+
+    def predict_batch(self, bgr_crops: list[np.ndarray]) -> list[tuple[str, float]]:
+        """Batch predict for a list of BGR crops in a single GPU forward pass."""
+        import torch
+        from PIL import Image
+        tensors = [
+            self._tf(Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)))
+            for bgr in bgr_crops
+        ]
+        batch = torch.stack(tensors).to(self._device)
+        with torch.no_grad():
+            probs = torch.softmax(self._model(batch), dim=1)
+            idxs  = probs.argmax(dim=1)
+        return [
+            (self._classes[int(i)], float(probs[j, int(i)]))
+            for j, i in enumerate(idxs)
+        ]
 
     def predict_top_k(self, bgr_crop: np.ndarray, k: int = 3
                       ) -> list[tuple[str, float]]:

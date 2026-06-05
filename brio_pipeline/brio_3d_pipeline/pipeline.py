@@ -58,9 +58,8 @@ def _make_run_dir() -> Path:
 
 def collect_images(sample_id: int) -> list[Path]:
     """
-    Sample every 3rd image (stride=3, skip 2 between each) from every
-    available elevation folder: Images30, Images45, Images60, Images90.
-    Missing folders are silently skipped.
+    Sample every 4th image (stride=4) from every available elevation folder:
+    Images30, Images45, Images60, Images90.  Missing folders are silently skipped.
     """
     base = cfg.MULTI_VIEW / f"Sample_{sample_id}"
     imgs = []
@@ -135,7 +134,7 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
     )
 
     # ── Back-projection + clustering ─────────────────────────────────────
-    proposals, visual_cls = compute_proposals(
+    proposals, visual_cls, cluster_colours = compute_proposals(
         dust3r_result, sam_masks, manifest.n_components,
         out_dir / "proposals",
         image_paths=img_paths,
@@ -144,7 +143,8 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
     )
 
     # ── Classification ───────────────────────────────────────────────────
-    results = assign_classes(proposals, manifest.components, visual_cls=visual_cls)
+    results = assign_classes(proposals, manifest.components,
+                             visual_cls=visual_cls, cluster_colours=cluster_colours)
 
     # ── Report ───────────────────────────────────────────────────────────
     print(f"\n[Results] Sample {sample_id}")

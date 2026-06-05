@@ -26,7 +26,6 @@ SAM_IOU_THRESH    = 0.80           # minimum predicted IoU to keep a mask
 SAM_STABILITY     = 0.90           # minimum stability score
 SAM_MIN_AREA      = 200            # minimum mask area in pixels
 
-DUST3R_SCENE_GRAPH = "complete"   # all N*(N-1)/2 pairs
 AUTO_CROP_PADDING  = 0.20         # padding fraction around the LCC bounding box
 
 DEVICE = "cuda"   # set to "cpu" as fallback if CUDA fails
