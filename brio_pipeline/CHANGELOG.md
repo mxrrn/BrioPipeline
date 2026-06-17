@@ -4,6 +4,47 @@ Changes are listed in reverse chronological order. Each entry records the date, 
 
 ---
 
+## 2026-06-17
+
+### README, .gitignore — outputs tracking
+**Files:** `brio_3d_pipeline/README.md` *(new)*, `.gitignore`
+
+- **`README.md`** (new): full pipeline documentation — stage-by-stage explanation of preprocessor, DUSt3R, SAM prompted mode, backprojector, and classifier; how-to-run commands; output directory structure; config table; known limitations.
+
+- **`.gitignore`**: removed blanket `outputs/` exclusion. The `outputs/` directory is now tracked. Only `**/dust3r/` within outputs remains excluded (`dust3r_cache.pkl` is 76 MB per sample, near GitHub's 100 MB hard limit and a pure regeneratable cache).
+
+---
+
+## 2026-06-16
+
+### SAM prompted mode — tight crop + black background + foreground-only grid prompts
+**Files:** `brio_3d_pipeline/sam_runner.py`, `brio_3d_pipeline/pipeline.py`
+
+Root cause of the joint-mask problem in auto mode: SAM's uniform 32-pt grid placed prompts on 2D boundaries between touching components, producing masks that spanned two instances simultaneously. These bridge masks then merged the corresponding 3D clusters in the voxel-overlap graph, causing incorrect group assignments. No amount of post-hoc filtering could recover them because the masks were internally coherent from SAM's perspective.
+
+Fix: switch to `SamPredictor` (prompt-based) as the default mode. For each image:
+
+- **`_tight_fg_crop()`** (new helper): crops the fixed-scale image to the tight bounding box of the foreground mask (+15 px padding). SAM's 1024×1024 encoder now sees only the construction, eliminating wasted capacity on white background and padding.
+
+- **Black background**: `crop_bgr[~foreground] = 0`. Every pixel outside the foreground mask is set to pure black before SAM encoding. Background is completely removed (vs. grey-fill in auto mode).
+
+- **`_fg_grid_points()`** (new helper): places a regular grid only inside the foreground mask at spacing `sqrt(fg_area / (N × 2.5))`, producing ~2.5 × N prompts total. Zero prompts on background pixels, unlike the old 32-pt uniform grid which covered the full fixed-scale crop including white margins.
+
+- **`_expand_masks()`** (new helper): translates masks from tight-crop coordinates back to fixed-scale image coordinates using the stored `(x_off, y_off)` offsets, so the backprojector can index them against DUSt3R `pts3d` without modification.
+
+- **`_run_sam_prompted()`** (new): orchestrates the above — one `predictor.set_image()` encoder pass per image, then one lightweight decoder pass per prompt point. Each prompt returns 3 mask candidates; highest-confidence one is kept. Same `_filter_masks()` post-filter pipeline as auto mode is applied after coordinate expansion.
+
+- **`run_sam_on_images()`**: added `mode` parameter (`"prompted"` default, `"auto"` for original behaviour). Prompted mode cache file uses suffix `_prompted_filt` to avoid conflicts with auto-mode caches.
+
+- **`pipeline.py`**: added `--sam-mode` CLI flag (`prompted` / `auto`), forwarded to `run_sam_on_images()` via `process_sample()`.
+
+**Measured improvement (run_021, samples 113–114)**:
+- SAM timing: ~0.5–0.8 s/image (vs. ~2–5 s auto mode).
+- Sample 113: all 5 components correctly found — blwo11_1 (226 926 pts), rome_1 (8 718), plpl53_1 (5 022), nu_1 (2 451), nu_2 (607).
+- Sample 114: 6/7 components correct — co-axial merge correctly fired on two stwo3 fragments; nu_1 received 0 pts (vacated cluster from the merge, known limitation).
+
+---
+
 ## 2026-06-12 (continued)
 
 ### Whole-object mask decomposition, 3D-overlap grouping, geometric coaxial merge, size-prior assignment
