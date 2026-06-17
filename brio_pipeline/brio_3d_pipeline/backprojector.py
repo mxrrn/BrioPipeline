@@ -1,25 +1,29 @@
 """
 Back-project SAM 2D masks → 3D instance point clouds using DUSt3R pts3d,
-then cluster all per-view mask clouds into N instance groups.
+then group all per-view mask clouds into N instance groups.
 
-Improvements over v1
-────────────────────
-* pts3d used directly — no manual K/pose/depth back-projection.
-* Feature vector = [3D median centroid (3) + mean HSV colour (3)] with
-  independent normalisation so colour and geometry contribute equally.
-* Agglomerative clustering (Ward, n_clusters=N) — globally optimal.
-* DBSCAN cleanup per cluster: adaptive eps from bbox diagonal, discards
+Grouping (v7)
+─────────────
+* pts3d used directly — no manual K/pose/depth back-projection; points below
+  the DUSt3R confidence threshold are dropped.
+* 3D-overlap graph: two masks (from any views) belong to the same instance
+  iff their 3D point clouds occupy the same voxels.  Union-find over the
+  overlap graph yields the groups; groups are merged down / padded to N.
+  This replaces Ward clustering on [centroid, HSV] features, which collapsed
+  whenever masks of different parts were closer in feature space than the
+  same part across views.
+* DBSCAN cleanup per group: adaptive eps from bbox diagonal, discards
   isolated noise points without assuming a Gaussian distribution.
+* Geometric co-axial merge re-joins rod fragments split by occlusion.
 * Optional ComponentClassifier: predicts the class of each SAM mask crop,
-  then majority-votes per cluster to produce a visual class label.
-  All crops are batched into a single GPU forward pass for speed.
+  then majority-votes per group to produce a visual class label.
 """
 import pickle
 import numpy as np
 import cv2
 from pathlib import Path
 from collections import Counter
-from sklearn.cluster import AgglomerativeClustering, DBSCAN
+from sklearn.cluster import DBSCAN
 
 # Same CLAHE settings as sam_runner — keeps classifier crops visually consistent
 # with what SAM saw when generating the masks.
@@ -35,14 +39,23 @@ _CLOUD_MAX_PTS = 5_000   # cap per-mask cloud to bound downstream memory
 
 # ── Point cloud helpers ───────────────────────────────────────────────────────
 
-def _extract_mask_cloud(pts3d_frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """World-space 3D points under mask from one DUSt3R frame (H×W×3)."""
+def _extract_mask_cloud(pts3d_frame: np.ndarray, mask: np.ndarray,
+                        conf: np.ndarray | None = None,
+                        conf_thresh: float = 0.0) -> np.ndarray:
+    """World-space 3D points under mask from one DUSt3R frame (H×W×3).
+
+    If a DUSt3R confidence map is given, pixels below `conf_thresh` are
+    dropped — these are typically textureless background or misaligned
+    regions that produce floating outlier points.
+    """
     if mask.shape != pts3d_frame.shape[:2]:
         mask = cv2.resize(
             mask.astype(np.uint8),
             (pts3d_frame.shape[1], pts3d_frame.shape[0]),
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
+    if conf is not None:
+        mask = np.logical_and(mask, conf >= conf_thresh)
     pts   = pts3d_frame[mask]
     valid = np.linalg.norm(pts, axis=1) > 1e-6
     pts   = pts[valid].astype(np.float32)
@@ -74,29 +87,200 @@ def _mean_hsv(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return (mean / np.array([180., 255., 255.])).astype(np.float32)
 
 
+_DBSCAN_MAX_PTS = 20_000   # subsample cap to keep DBSCAN memory O(n), not O(n²)
+
+
 def _dbscan_cleanup(pts: np.ndarray,
                     eps_frac: float = 0.05,
                     min_samples: int = 5) -> np.ndarray:
     """
     Remove outlier points using DBSCAN: keep only the largest dense cluster.
 
-    eps is set adaptively as eps_frac × bounding-box diagonal so the threshold
-    auto-scales with the physical size of the construction, removing the need to
-    tune an absolute distance.  Points labelled -1 (noise) are discarded.
-    If DBSCAN marks everything as noise the original cloud is returned unchanged.
+    eps = eps_frac × bounding-box diagonal (auto-scales with construction size).
+    If the merged cloud is large, DBSCAN runs on a random subsample and the
+    resulting main-cluster centroid + radius is used to filter the full cloud —
+    keeping memory O(n) rather than O(n²) for dense neighbourhoods.
     """
     if len(pts) < min_samples * 2:
         return pts
-    diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+
+    # Subsample for DBSCAN to bound neighbour-list memory
+    if len(pts) > _DBSCAN_MAX_PTS:
+        sub_idx = np.random.choice(len(pts), _DBSCAN_MAX_PTS, replace=False)
+        sub = pts[sub_idx]
+    else:
+        sub_idx = None
+        sub = pts
+
+    diag = float(np.linalg.norm(sub.max(axis=0) - sub.min(axis=0)))
     eps  = max(diag * eps_frac, 1e-4)
-    labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(pts)
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(sub)
+
     core_mask = labels != -1
     if not core_mask.any():
-        return pts  # all labelled noise — nothing to remove
+        return pts  # all noise — return original
+
     unique, counts = np.unique(labels[core_mask], return_counts=True)
     main_label = unique[counts.argmax()]
-    kept = pts[labels == main_label].astype(np.float32)
+    main_sub   = sub[labels == main_label]
+
+    if sub_idx is None:
+        # Small cloud — labels apply directly
+        kept = pts[labels == main_label].astype(np.float32)
+    else:
+        # Large cloud — use the subsample's main cluster to define a radius
+        # filter on the full cloud so outlier removal generalises beyond the sub.
+        centre = np.median(main_sub, axis=0)
+        dists  = np.linalg.norm(pts - centre, axis=1)
+        radius = np.percentile(np.linalg.norm(main_sub - centre, axis=1), 95) * 2.0
+        kept   = pts[dists <= radius].astype(np.float32)
+
     return kept if len(kept) >= min_samples else pts
+
+
+def _overlap_group(clouds: list[np.ndarray], n_target: int,
+                   overlap_min: float = 0.20, voxel_div: int = 40) -> np.ndarray:
+    """
+    Group per-view mask clouds by 3D voxel overlap.
+
+    Pairwise affinity:
+        overlap_ij = |voxels_i ∩ voxels_j| / min(|voxels_i|, |voxels_j|)
+    (clipped to 0 below overlap_min).  Groups come from AVERAGE-LINKAGE
+    agglomerative clustering on distance 1 − overlap with n_clusters = N.
+    Average linkage is essential: connected components / single linkage
+    chain through shared boundary voxels and collapse the whole assembly
+    into one blob (observed on sample 113: 200 clouds → 2 components).
+
+    Returns an int label array (len == len(clouds), values in [0, n_target)).
+    """
+    from sklearn.cluster import AgglomerativeClustering
+
+    K = len(clouds)
+    labels = np.zeros(K, np.int64)
+    valid = [i for i in range(K) if len(clouds[i]) > 0]
+    if not valid:
+        return labels
+
+    all_pts = np.concatenate([clouds[i] for i in valid], axis=0)
+    diag  = float(np.linalg.norm(all_pts.max(axis=0) - all_pts.min(axis=0)))
+    voxel = max(diag / voxel_div, 1e-5)
+
+    keys: list[set] = [
+        set(map(tuple, np.floor(c / voxel).astype(np.int64))) if len(c) else set()
+        for c in clouds
+    ]
+
+    # ── Pairwise overlap matrix among valid clouds ────────────────────────
+    nv = len(valid)
+    overlap = np.zeros((nv, nv), np.float32)
+    for a in range(nv):
+        ka = keys[valid[a]]
+        for b in range(a + 1, nv):
+            kb = keys[valid[b]]
+            inter = len(ka & kb)
+            if inter:
+                ov = inter / min(len(ka), len(kb))
+                if ov >= overlap_min:
+                    overlap[a, b] = overlap[b, a] = ov
+
+    n_groups = min(n_target, nv)
+    dist = 1.0 - overlap
+    np.fill_diagonal(dist, 0.0)
+    lab_valid = AgglomerativeClustering(
+        n_clusters=n_groups, metric="precomputed", linkage="average"
+    ).fit_predict(dist)
+
+    # Stable ordering: biggest group (by points) first
+    sizes = np.zeros(n_groups)
+    for a, i in enumerate(valid):
+        sizes[lab_valid[a]] += len(clouds[i])
+    order = np.argsort(-sizes)
+    remap = {int(old): new for new, old in enumerate(order)}
+    for a, i in enumerate(valid):
+        labels[i] = remap[int(lab_valid[a])]
+
+    linked = int((overlap > 0).sum() // 2)
+    print(f"[Backproject] Overlap clustering: {nv} clouds, {linked} links "
+          f"→ {n_groups} groups (avg-linkage, voxel={voxel*1000:.1f} mm)")
+    return labels
+
+
+def _coaxial_merge(
+    clouds      : list[np.ndarray],
+    visual_cls  : list[str | None],
+    max_gap_m   : float,
+    angle_deg   : float,
+    max_offset_m: float = 0.012,
+    min_elong   : float = 2.5,
+) -> tuple[list[np.ndarray], list[str | None]]:
+    """
+    Merge pairs of clusters that are co-axial fragments of the same rod.
+
+    A rod passing through a connector is occluded in the middle; the two
+    visible ends reconstruct as disjoint lobes.  Purely geometric test —
+    two clusters are fragments of one rod iff:
+      1. both are elongated (PCA σ1/σ2 > min_elong) — only rods qualify
+      2. their principal axes are within `angle_deg` of each other
+      3. the lateral offset between the two axes is < max_offset_m
+         (rejects distinct parallel rods lying side by side)
+      4. the gap between their 1-D projections onto the axis is < max_gap_m
+         AND less than 50 % of the combined span
+
+    The smaller cloud is absorbed into the larger one; its entry is zeroed out
+    (it still occupies a slot so the Hungarian assignment keeps N clusters).
+    """
+    n = len(clouds)
+
+    def _pca(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+        """Return (mean, principal axis, elongation σ1/σ2)."""
+        mean = pts.mean(axis=0)
+        _, S, Vt = np.linalg.svd(pts - mean, full_matrices=False)
+        return mean, Vt[0], float(S[0] / max(S[1], 1e-9))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            pi, pj = clouds[i], clouds[j]
+            if len(pi) < 30 or len(pj) < 30:
+                continue
+
+            ci, ai, ei = _pca(pi)
+            cj, aj, ej = _pca(pj)
+            if ei < min_elong or ej < min_elong:
+                continue
+            if abs(float(np.dot(ai, aj))) < np.cos(np.radians(angle_deg)):
+                continue
+
+            # Lateral offset: distance between the two axes (component of the
+            # centroid difference perpendicular to the shared axis)
+            axis = ai
+            d    = cj - ci
+            lat  = float(np.linalg.norm(d - np.dot(d, axis) * axis))
+            if lat > max_offset_m:
+                continue
+
+            proj_i = pi @ axis
+            proj_j = pj @ axis
+            lo_all = min(proj_i.min(), proj_j.min())
+            hi_all = max(proj_i.max(), proj_j.max())
+            span   = hi_all - lo_all
+            gap    = max(0.0, max(proj_i.min(), proj_j.min())
+                             - min(proj_i.max(), proj_j.max()))
+
+            if gap > max_gap_m or gap > 0.5 * span:
+                continue
+
+            # Absorb smaller cloud into larger; zero out smaller slot
+            src, dst = (j, i) if len(pj) <= len(pi) else (i, j)
+            clouds[dst] = np.concatenate([clouds[dst], clouds[src]], axis=0)
+            clouds[src] = np.empty((0, 3), np.float32)
+            if visual_cls[dst] is None:
+                visual_cls[dst] = visual_cls[src]
+            visual_cls[src] = None
+            print(f"[Backproject] Co-axial merge: cluster {src} → {dst}  "
+                  f"elong=({ei:.1f},{ej:.1f})  lat={lat*1000:.1f} mm  "
+                  f"gap={gap:.3f} m  span={span:.3f} m")
+
+    return clouds, visual_cls
 
 
 # ── Main API ──────────────────────────────────────────────────────────────────
@@ -128,7 +312,7 @@ def compute_proposals(dust3r_result: dict,
     """
     use_visual = classifier is not None
     cache_suffix = "_vis" if use_visual else ""
-    cache_file = output_dir / f"proposals_N{n_components}_v5{cache_suffix}.pkl"
+    cache_file = output_dir / f"proposals_N{n_components}_v9{cache_suffix}.pkl"
     if cache_file.exists():
         print(f"[Backproject] Loading cached proposals from {cache_file}")
         with open(cache_file, "rb") as f:
@@ -136,9 +320,13 @@ def compute_proposals(dust3r_result: dict,
 
     output_dir.mkdir(parents=True, exist_ok=True)
     pts3d_all = dust3r_result["pts3d"]   # list of (H, W, 3)
+    confs_all = dust3r_result.get("confs")   # list of (H, W) or None (old cache)
+    import config as _cfg
+    conf_thresh = _cfg.DUST3R_CONF_THRESH if confs_all is not None else 0.0
     use_colour = image_paths is not None
     print(f"[Backproject] {len(sam_masks_per_image)} views × top-{n_components} masks  "
-          f"colour={'yes' if use_colour else 'no'}  visual={'yes' if use_visual else 'no'}")
+          f"colour={'yes' if use_colour else 'no'}  visual={'yes' if use_visual else 'no'}  "
+          f"conf_filter={'>=%.1f' % conf_thresh if confs_all is not None else 'off'}")
 
     from component_classifier import crop_from_mask
 
@@ -152,17 +340,21 @@ def compute_proposals(dust3r_result: dict,
     pending_idx   : list[int]        = []   # index into all_clouds for each crop
 
     for img_idx, (masks, p3d) in enumerate(zip(sam_masks_per_image, pts3d_all)):
+        conf = confs_all[img_idx] if confs_all is not None else None
         # Load image for colour and visual extraction (once per image).
+        # Colour features come from the RAW image so they match the class
+        # prototypes (built from raw reference images); CLAHE is only applied
+        # to classifier crops for consistency with what SAM saw.
         bgr, img_rgb = None, None
         if use_colour and img_idx < len(image_paths):
-            bgr = cv2.imread(str(image_paths[img_idx]))
-            if bgr is not None:
-                bgr = _clahe_enhance(bgr)
-                img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            bgr_raw = cv2.imread(str(image_paths[img_idx]))
+            if bgr_raw is not None:
+                bgr     = _clahe_enhance(bgr_raw)
+                img_rgb = cv2.cvtColor(bgr_raw, cv2.COLOR_BGR2RGB)
 
         for mask_dict in masks:
             seg = mask_dict["segmentation"]
-            pts = _extract_mask_cloud(p3d, seg)
+            pts = _extract_mask_cloud(p3d, seg, conf=conf, conf_thresh=conf_thresh)
             if len(pts) < 20:
                 continue
 
@@ -198,25 +390,15 @@ def compute_proposals(dust3r_result: dict,
             all_colours.append(np.zeros(3, np.float32))
             all_visual_cls.append(None)
 
-    centroids_arr = np.array(all_centroids, np.float32)   # (K, 3)
-    colours_arr   = np.array(all_colours,   np.float32)   # (K, 3)
+    colours_arr = np.array(all_colours, np.float32)   # (K, 3)
 
-    # ── Normalise each feature block to unit std ──────────────────────────
-    c_std = centroids_arr.std(axis=0).clip(1e-6)
-    col_std = colours_arr.std(axis=0).clip(1e-6)
+    print(f"[Backproject] Grouping {len(all_clouds)} clouds into ≤{n_components} "
+          f"instances via 3D voxel overlap")
 
-    feat = np.concatenate([
-        centroids_arr / c_std,
-        colours_arr   / col_std,
-    ], axis=1)   # (K, 6)
-
-    print(f"[Backproject] Clustering {len(all_clouds)} clouds into {n_components} groups "
-          f"using geometry + colour features")
-
-    # ── Agglomerative clustering ──────────────────────────────────────────
-    labels = AgglomerativeClustering(
-        n_clusters=n_components, metric="euclidean", linkage="ward"
-    ).fit_predict(feat)
+    # ── 3D-overlap graph grouping ─────────────────────────────────────────
+    labels = _overlap_group(all_clouds, n_components,
+                            overlap_min=_cfg.OVERLAP_MIN,
+                            voxel_div=_cfg.OVERLAP_VOXEL_DIV)
 
     # ── Merge + DBSCAN cleanup + visual majority vote ─────────────────────
     merged: list[np.ndarray] = []
@@ -241,7 +423,17 @@ def compute_proposals(dust3r_result: dict,
         dominant = Counter(votes).most_common(1)[0][0] if votes else None
         visual_cls_per_cluster.append(dominant)
 
-    print(f"[Backproject] Results after DBSCAN cleanup:")
+    # ── Co-axial rod fragment merge ───────────────────────────────────────
+    if _cfg.MAX_ROD_GAP_M > 0:
+        merged, visual_cls_per_cluster = _coaxial_merge(
+            merged, visual_cls_per_cluster,
+            max_gap_m=_cfg.MAX_ROD_GAP_M,
+            angle_deg=_cfg.COAXIAL_ANGLE_DEG,
+            max_offset_m=_cfg.COAXIAL_MAX_OFFSET_M,
+            min_elong=_cfg.COAXIAL_MIN_ELONG,
+        )
+
+    print(f"[Backproject] Results after DBSCAN cleanup + co-axial merge:")
     for i, (pts, vcls) in enumerate(zip(merged, visual_cls_per_cluster)):
         c = _median_centroid(pts)
         print(f"  Cluster {i}: {len(pts):>7d} pts | "

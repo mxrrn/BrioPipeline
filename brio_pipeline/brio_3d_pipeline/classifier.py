@@ -19,10 +19,35 @@ Assignment
 Hungarian assignment (scipy linear_sum_assignment) minimises total cost
 across all N proposal → manifest pairings.  No greedy local decisions.
 """
+import re
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from dataclasses import dataclass
 from pathlib import Path
+
+
+# ── Nominal sizes (scale-free size prior) ────────────────────────────────────
+# BRIO class codes encode dimensions in studs: blwo21 = block 2×1,
+# plpl53 = plate 5×3, stwo9 = strap with 9 holes, etc.  For codes without
+# digits, approximate relative long-dimension in the same unit.  Only the
+# RATIO between manifest entries is used, so the absolute unit cancels out
+# (DUSt3R scale is arbitrary per sample).
+_NOMINAL_NO_DIGITS = {
+    "rolo": 8.0, "rome": 6.0, "rosm": 4.0,      # rods long/medium/small
+    "sclo": 4.0, "scme": 3.0, "scsm": 2.0,      # screws
+    "nu": 1.2, "wa": 0.8, "pl": 1.0, "sl": 2.0, # nut, washer, plug, sleeve
+    "bo": 1.5,                                    # bolt: short thin cylinder — smaller than blwo21/plwo21
+    "no": 2.0, "ti": 3.0,                        # nose, tire
+    "whre": 2.0, "whwh": 2.0,                   # wheels
+}
+
+
+def _nominal_size(cls: str) -> float:
+    """Nominal long-dimension of a class in BRIO stud units."""
+    if cls in _NOMINAL_NO_DIGITS:
+        return _NOMINAL_NO_DIGITS[cls]
+    digits = [int(d) for d in re.findall(r"\d", cls)]
+    return float(max(digits)) if digits else 1.0
 
 
 @dataclass
@@ -68,6 +93,7 @@ def assign_classes(proposals   : list[np.ndarray],
                    visual_cls  : list[str | None] | None = None,
                    cluster_colours: list[np.ndarray] | None = None,
                    colour_weight: float = 1.5,
+                   size_weight  : float = 1.0,
                    visual_mismatch_penalty: float = 8.0,
                    ) -> list["InstanceResult"]:
     """
@@ -76,7 +102,9 @@ def assign_classes(proposals   : list[np.ndarray],
     Cost matrix priority (highest to lowest):
       1. Visual classifier vote (if available and confident): large penalty on mismatch
       2. Colour distance: L2 between observed cluster HSV and class prototype HSV
-      3. Geometry: not used (no per-class geometry prototypes available)
+      3. Size: |relative observed extent − relative nominal extent|.  Both are
+         normalised by the largest value within the sample, so the comparison
+         is scale-free (DUSt3R reconstruction scale is arbitrary).
 
     Args:
         proposals               : list of N (M_i, 3) point clouds
@@ -96,6 +124,16 @@ def assign_classes(proposals   : list[np.ndarray],
 
     have_colour = cluster_colours is not None
 
+    # Scale-free size features: observed max extent per proposal and nominal
+    # size per manifest entry, each normalised by the in-sample maximum.
+    obs_ext = np.array([
+        float((p.max(0) - p.min(0)).max()) if len(p) > 0 else 0.0
+        for p in proposals
+    ], np.float32)
+    rel_obs = obs_ext / max(obs_ext.max(), 1e-6)
+    nom = np.array([_nominal_size(c.cls) for c in manifest_components], np.float32)
+    rel_nom = nom / max(nom.max(), 1e-6)
+
     cost = np.zeros((n, n), np.float32)
     for pi in range(n):
         obs_hsv = cluster_colours[pi] if have_colour else None
@@ -105,13 +143,17 @@ def assign_classes(proposals   : list[np.ndarray],
             # L2 distance between observed cluster HSV and class prototype
             c_cost = float(np.linalg.norm(obs_hsv - proto)) if obs_hsv is not None else 0.0
 
+            # Relative-size mismatch (empty proposals carry no size signal)
+            s_cost = abs(float(rel_obs[pi]) - float(rel_nom[mi])) \
+                     if obs_ext[pi] > 0 else 0.0
+
             # Visual mismatch penalty
             v_penalty = 0.0
             if visual_cls is not None and visual_cls[pi] is not None:
                 if visual_cls[pi] != comp.cls:
                     v_penalty = visual_mismatch_penalty
 
-            cost[pi, mi] = colour_weight * c_cost + v_penalty
+            cost[pi, mi] = colour_weight * c_cost + size_weight * s_cost + v_penalty
 
     row_ind, col_ind = linear_sum_assignment(cost)
 

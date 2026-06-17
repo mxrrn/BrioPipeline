@@ -191,7 +191,11 @@ def visualize_2d(sample_id: int, run_dir: Path, views_per_component: int = 8) ->
     with open(dust3r_path, "rb") as f:
         dust3r = pickle.load(f)
 
-    sam_files = sorted(sam_dir.glob("sam_masks_top*.pkl"))
+    # Prefer the newest filter generation (filt3 > filt2 > filt > legacy)
+    sam_files = (sorted(sam_dir.glob("sam_masks_top*_filt3.pkl"))
+                 or sorted(sam_dir.glob("sam_masks_top*_filt2.pkl"))
+                 or sorted(sam_dir.glob("sam_masks_top*_filt.pkl"))
+                 or sorted(sam_dir.glob("sam_masks_top*.pkl")))
     with open(sam_files[0], "rb") as f:
         sam_masks = pickle.load(f)
 

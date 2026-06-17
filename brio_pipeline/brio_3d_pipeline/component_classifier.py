@@ -12,8 +12,6 @@ Inference:
 import numpy as np
 import cv2
 from pathlib import Path
-from collections import Counter
-
 # ── Folder name → PUML class code (single source of truth in component_map) ──
 from component_map import FOLDER_TO_CLASS as FOLDER_TO_CODE
 
@@ -47,6 +45,9 @@ def crop_from_mask(bgr: np.ndarray, mask: np.ndarray,
     y0 = max(0, y0 - py);  y1 = min(H, y1 + py)
     x0 = max(0, x0 - px);  x1 = min(W, x1 + px)
     crop = bgr[y0:y1, x0:x1].copy()
+    # Grey-fill pixels outside the mask so the classifier sees only this component
+    mask_crop = mask[y0:y1, x0:x1]
+    crop[~mask_crop] = 128
     # Pad to square with white background
     ch, cw = crop.shape[:2]
     if ch == cw:

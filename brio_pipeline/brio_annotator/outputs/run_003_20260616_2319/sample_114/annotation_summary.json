@@ -1,0 +1,85 @@
+{
+  "sample_id": 114,
+  "n_components": 7,
+  "primary_view": "/mnt/c/BA/02-resources/data/multi_view_images/Sample_114/Images90/Sample_114_1.jpg",
+  "n_target_views_labelled": 5,
+  "annotations": [
+    {
+      "cls": "plwo53",
+      "instance_id": "plwo53_1",
+      "bbox_xyxy": [
+        702,
+        725,
+        835,
+        964
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "stwo3",
+      "instance_id": "stwo3_1",
+      "bbox_xyxy": [
+        522,
+        749,
+        700,
+        924
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "scsm",
+      "instance_id": "scsm_2",
+      "bbox_xyxy": [
+        581,
+        698,
+        766,
+        877
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "scsm",
+      "instance_id": "scsm_1",
+      "bbox_xyxy": [
+        665,
+        821,
+        851,
+        973
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "stwo3",
+      "instance_id": "stwo3_2",
+      "bbox_xyxy": [
+        700,
+        693,
+        879,
+        840
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "nu",
+      "instance_id": "nu_1",
+      "bbox_xyxy": [
+        783,
+        726,
+        987,
+        884
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "nu",
+      "instance_id": "nu_2",
+      "bbox_xyxy": [
+        653,
+        821,
+        837,
+        975
+      ],
+      "amodal": false
+    }
+  ]
+}

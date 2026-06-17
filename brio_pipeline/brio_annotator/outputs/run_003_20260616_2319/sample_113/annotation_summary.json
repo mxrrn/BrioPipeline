@@ -1,0 +1,63 @@
+{
+  "sample_id": 113,
+  "n_components": 5,
+  "primary_view": "/mnt/c/BA/02-resources/data/multi_view_images/Sample_113/Images60/Sample_113_20.jpg",
+  "n_target_views_labelled": 1,
+  "annotations": [
+    {
+      "cls": "rome",
+      "instance_id": "rome_1",
+      "bbox_xyxy": [
+        667,
+        589,
+        829,
+        746
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "nu",
+      "instance_id": "nu_1",
+      "bbox_xyxy": [
+        667,
+        732,
+        829,
+        871
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "plpl53",
+      "instance_id": "plpl53_1",
+      "bbox_xyxy": [
+        689,
+        676,
+        824,
+        830
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "nu",
+      "instance_id": "nu_2",
+      "bbox_xyxy": [
+        697,
+        740,
+        847,
+        872
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "blwo11",
+      "instance_id": "blwo11_1",
+      "bbox_xyxy": [
+        699,
+        592,
+        859,
+        724
+      ],
+      "amodal": false
+    }
+  ]
+}

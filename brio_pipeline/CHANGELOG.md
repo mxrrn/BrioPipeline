@@ -4,6 +4,50 @@ Changes are listed in reverse chronological order. Each entry records the date, 
 
 ---
 
+## 2026-06-12 (continued)
+
+### Whole-object mask decomposition, 3D-overlap grouping, geometric coaxial merge, size-prior assignment
+**Files:** `brio_3d_pipeline/sam_runner.py`, `brio_3d_pipeline/backprojector.py`, `brio_3d_pipeline/classifier.py`, `brio_3d_pipeline/config.py`, `brio_3d_pipeline/pipeline.py`, `brio_3d_pipeline/visualize_2d.py`, `brio_3d_pipeline/dust3r_runner.py`
+
+Five fixes following the run_018/019/020 evaluation (sample 19 fully correct; sample 27 block under-covered; sample 113 grouping/labels still wrong):
+
+- **`sam_runner.py` — mask subtraction**: oversized on-foreground masks are no longer dropped (that erased the wood block in sample 27, where one part dominates the silhouette). They are decomposed instead: subtract the kept smaller masks, keep the remainder as the dominant component. Single-component fallback keeps the largest oversized mask. Up to `SAM_KEEP_FACTOR`×N masks per view are now kept so thin/low-scoring components survive selection. Cache suffix `_filt` → `_filt2`.
+
+- **Thin-structure recall (`config.py`)**: `SAM_POINTS_SIDE` 16→32 (a 16-grid put a prompt every ~14 px — the ~6 px rod in sample 113 was never hit), `SAM_IOU_THRESH` 0.80→0.70, `SAM_STABILITY` 0.90→0.85, `SAM_MIN_AREA` 200→80.
+
+- **`backprojector.py` — 3D-overlap graph grouping**: replaces Ward clustering on [centroid, HSV] (which split the sample-113 plate across two clusters). Masks are linked iff their 3D clouds share ≥`OVERLAP_MIN` of voxels (voxel = scene diagonal / `OVERLAP_VOXEL_DIV`); union-find components are merged down to N by max overlap / nearest centroid. Proposals cache → `_v7`.
+
+- **`backprojector.py` — geometric coaxial merge**: the visual-class equality gate is gone (the classifier rarely fires). Fragments merge iff both are elongated (PCA σ1/σ2 > `COAXIAL_MIN_ELONG`), axes aligned within `COAXIAL_ANGLE_DEG`, lateral axis offset < `COAXIAL_MAX_OFFSET_M` (rejects parallel rods), and the axial gap < `MAX_ROD_GAP_M` and < 50 % of the span.
+
+- **`classifier.py` — size prior**: new `_nominal_size()` decodes class codes into stud units (blwo21 = 2, plpl53 = 5, stwo9 = 9; digit-free codes from a lookup table). Cost adds `size_weight × |rel_obs − rel_nom|` with both extents normalised by the in-sample maximum, so DUSt3R's arbitrary scale cancels. Cluster colours are now computed from RAW images (CLAHE skewed them relative to the raw-image prototypes; CLAHE remains for classifier crops only).
+
+- **`dust3r_runner.py` — VRAM release**: DUSt3R model/scene freed (`torch.cuda.empty_cache()`) before SAM runs in the same process. Root cause of a 20+ min SAM hang at 7.9/8.2 GB VRAM.
+
+---
+
+## 2026-06-12
+
+### SAM background-mask rejection + DUSt3R confidence filtering
+**Files:** `brio_3d_pipeline/sam_runner.py`, `brio_3d_pipeline/dust3r_runner.py`, `brio_3d_pipeline/backprojector.py`, `brio_3d_pipeline/pipeline.py`, `brio_3d_pipeline/visualize.py`, `brio_3d_pipeline/visualize_2d.py`, `brio_3d_pipeline/config.py`
+
+Root-cause fix for background masking and noisy 3D clouds. The old SAM stage kept the top-N masks by `predicted_iou`, which systematically selected the background/whole-scene masks (verified on run_017: in every view the #1-ranked mask was 2.4–3.8× the foreground area). All downstream clustering and labeling was unrecoverable from that input.
+
+- **`sam_runner.py`**: Added `_foreground_mask()` (largest connected non-white region, same `BG_THRESHOLD=245` logic as the preprocessor, computed on the pre-CLAHE image) and `_filter_masks()` which rejects masks that are (1) larger than `SAM_MAX_AREA_FRAC` of the foreground (whole-object/scene masks), (2) less than `SAM_FG_OVERLAP_MIN` inside the foreground (background/table), (3) touching the image border, or (4) near-duplicates (IoU > `SAM_DEDUP_IOU`, keeping the higher predicted IoU). Top-N selection now happens *after* filtering. Cache filename gains a `_filt` suffix to invalidate old caches.
+
+- **`dust3r_runner.py`**: Result dict now includes `confs` (per-image DUSt3R confidence maps from `scene.im_conf`). Old caches missing `confs` are regenerated.
+
+- **`backprojector.py`**: `_extract_mask_cloud()` drops points below `DUST3R_CONF_THRESH` (textureless/misaligned background producing floating outliers). Proposals cache bumped to `_v6`.
+
+- **`visualize.py`**: Scene cloud now filters by DUSt3R confidence and drops near-white background/padding pixels — the 3D view shows only the object.
+
+- **`visualize_2d.py`**: Prefers the new `_filt` SAM cache over legacy unfiltered ones in resumed run dirs.
+
+- **`config.py`**: Added `SAM_MAX_AREA_FRAC` (0.50), `SAM_FG_OVERLAP_MIN` (0.60), `SAM_DEDUP_IOU` (0.80), `DUST3R_CONF_THRESH` (2.0; DUSt3R demo default is 3.0 — raise if clouds stay noisy).
+
+Verified against run_017 sample 113 cached masks: the filters reject 24/100 previously-kept masks, including the giant background mask in all 20 views.
+
+---
+
 ## 2026-05-26 (continued)
 
 ### Component visual classifier (Option A)

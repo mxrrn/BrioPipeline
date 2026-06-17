@@ -1,0 +1,41 @@
+{
+  "sample_id": 115,
+  "n_components": 3,
+  "primary_view": "/mnt/c/BA/02-resources/data/multi_view_images/Sample_115/Images60/Sample_115_17.jpg",
+  "n_target_views_labelled": 7,
+  "annotations": [
+    {
+      "cls": "stwo4",
+      "instance_id": "stwo4_1",
+      "bbox_xyxy": [
+        764,
+        755,
+        954,
+        892
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "bo",
+      "instance_id": "bo_1",
+      "bbox_xyxy": [
+        610,
+        700,
+        832,
+        900
+      ],
+      "amodal": false
+    },
+    {
+      "cls": "plwo33",
+      "instance_id": "plwo33_1",
+      "bbox_xyxy": [
+        639,
+        659,
+        883,
+        893
+      ],
+      "amodal": false
+    }
+  ]
+}

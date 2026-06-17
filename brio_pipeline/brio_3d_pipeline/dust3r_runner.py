@@ -25,13 +25,17 @@ def run_dust3r(image_paths: list[Path], output_dir: Path, device: str = "cuda",
         intrinsics : np.ndarray (N, 3, 3)  camera intrinsics K
         depths     : list[np.ndarray]       per-image depth map (H, W)
         pts3d      : list[np.ndarray]       per-image 3D points (H, W, 3) world space
+        confs      : list[np.ndarray]       per-image confidence map (H, W)
         image_paths: list[str]              ordered image paths matching above arrays
     """
     cache_file = output_dir / "dust3r_cache.pkl"
     if cache_file.exists():
-        print(f"[DUSt3R] Loading cached results from {cache_file}")
         with open(cache_file, "rb") as f:
-            return pickle.load(f)
+            cached = pickle.load(f)
+        if "confs" in cached:
+            print(f"[DUSt3R] Loading cached results from {cache_file}")
+            return cached
+        print(f"[DUSt3R] Cache at {cache_file} predates confidence maps — regenerating")
 
     print(f"[DUSt3R] Running on {len(image_paths)} images (device={device})")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -68,12 +72,20 @@ def run_dust3r(image_paths: list[Path], output_dir: Path, device: str = "cuda",
     intrinsics = scene.get_intrinsics().detach().cpu().numpy()    # (N, 3, 3)
     depths     = [d.detach().cpu().numpy() for d in scene.get_depthmaps()]
     pts3d      = [p.detach().cpu().numpy() for p in scene.get_pts3d()]
+    confs      = [c.detach().cpu().numpy() for c in scene.im_conf]
+
+    # Free DUSt3R GPU memory before SAM runs in the same process — otherwise
+    # SAM thrashes at the 8 GB VRAM limit (observed: 20+ min hangs).
+    import torch
+    del scene, output, model
+    torch.cuda.empty_cache()
 
     result = {
         "poses":       poses,
         "intrinsics":  intrinsics,
         "depths":      depths,
         "pts3d":       pts3d,
+        "confs":       confs,
         "image_paths": str_paths,
     }
 

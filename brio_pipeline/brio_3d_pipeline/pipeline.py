@@ -4,8 +4,7 @@ BRIO 3D Pipeline — main orchestration script.
 
 Optimised run settings
 ──────────────────────
-* Multi-elevation composite: Images90 (all 8, top-down) + Images45 (every 4th = 6)
-  → 14 images with much better XY and Z separation than 24 from one ring
+* Multi-elevation composite: every 4th image from Images30/45/60/90 → ~20 images
 * Fixed global scale: all samples in the same run share the same crop window size
   (the largest construction sets the scale; smaller ones get white padding)
 * Agglomerative clustering with geometry + colour features for instance grouping
@@ -91,7 +90,8 @@ def _load_classifier(device: str) -> ComponentClassifier | None:
 
 
 def process_sample(sample_id: int, fixed_half: int, device: str,
-                   run_dir: Path, classifier: ComponentClassifier | None = None) -> dict:
+                   run_dir: Path, classifier: ComponentClassifier | None = None,
+                   sam_mode: str = "prompted") -> dict:
     print(f"\n{'='*60}")
     print(f" Sample {sample_id}")
     print(f"{'='*60}")
@@ -131,6 +131,9 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
         weights_path=cfg.SAM_WEIGHTS, model_type=cfg.SAM_MODEL_TYPE, device=device,
         points_per_side=cfg.SAM_POINTS_SIDE, iou_thresh=cfg.SAM_IOU_THRESH,
         stability_thresh=cfg.SAM_STABILITY, min_area=cfg.SAM_MIN_AREA,
+        max_area_frac=cfg.SAM_MAX_AREA_FRAC, fg_overlap_min=cfg.SAM_FG_OVERLAP_MIN,
+        dedup_iou=cfg.SAM_DEDUP_IOU, keep_factor=cfg.SAM_KEEP_FACTOR,
+        mode=sam_mode,
     )
 
     # ── Back-projection + clustering ─────────────────────────────────────
@@ -181,14 +184,27 @@ def main():
     parser = argparse.ArgumentParser(description="BRIO 3D pipeline")
     parser.add_argument("--samples", nargs="+", type=int, default=[113],
                         help="Sample IDs to process")
-    parser.add_argument("--device",  default=cfg.DEVICE)
+    parser.add_argument("--device",   default=cfg.DEVICE)
+    parser.add_argument("--sam-mode", default="prompted",
+                        choices=["prompted", "auto"],
+                        help="SAM segmentation mode: 'prompted' (default, tight-crop "
+                             "+ foreground-only grid) or 'auto' (original uniform grid)")
+    parser.add_argument("--resume",  default=None,
+                        help="Resume an existing run dir (e.g. run_015_20260605_1450). "
+                             "Reuses cached DUSt3R/SAM outputs and skips completed samples.")
     args = parser.parse_args()
     label = "samples_" + "_".join(str(s) for s in args.samples)
     setup_logging(label)
 
-    # ── Create timestamped run directory ──────────────────────────────────
-    run_dir = _make_run_dir()
-    print(f"[Run] Output directory: {run_dir}")
+    # ── Create or resume run directory ────────────────────────────────────
+    if args.resume:
+        run_dir = cfg.OUTPUTS_ROOT / args.resume
+        if not run_dir.exists():
+            raise FileNotFoundError(f"Resume dir not found: {run_dir}")
+        print(f"[Run] Resuming: {run_dir}")
+    else:
+        run_dir = _make_run_dir()
+        print(f"[Run] Output directory: {run_dir}")
 
     # ── Load visual classifier (optional) ────────────────────────────────
     classifier = _load_classifier(args.device)
@@ -201,7 +217,8 @@ def main():
     # ── Main pass: process each sample ───────────────────────────────────
     for sid, raw_paths in zip(args.samples, all_raw):
         process_sample(sid, fixed_half=fixed_half, device=args.device,
-                       run_dir=run_dir, classifier=classifier)
+                       run_dir=run_dir, classifier=classifier,
+                       sam_mode=args.sam_mode)
 
     print(f"\nAll samples processed → {run_dir}")
 

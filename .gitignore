@@ -4,8 +4,8 @@ __pycache__/
 *.pyo
 
 # Large pipeline cache files
-brio_3d_pipeline/outputs/
-brio_3d_pipeline/logs/
+brio_pipeline/brio_3d_pipeline/outputs/
+brio_pipeline/brio_3d_pipeline/logs/
 
 # YOLO training outputs and generated dataset
 brio_pipeline/brio_fast_pipeline/runs/
