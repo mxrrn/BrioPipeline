@@ -4,7 +4,8 @@ __pycache__/
 *.pyo
 
 # Large pipeline cache files
-brio_pipeline/brio_3d_pipeline/outputs/
+# outputs/ tracked — but DUSt3R cache excluded (76 MB per sample, near GitHub 100 MB limit)
+brio_pipeline/brio_3d_pipeline/outputs/**/dust3r/
 brio_pipeline/brio_3d_pipeline/logs/
 
 # YOLO training outputs and generated dataset
