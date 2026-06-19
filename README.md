@@ -111,20 +111,8 @@ Construction
     │               ├── viz_2d.png
     │               └── viz_3d.ply
     │
-    └── brio_fast_pipeline/      ← fast inference pipeline (YOLOv8 + triangulation)
-        ├── config.py
-        ├── logger.py
-        ├── label_exporter.py    ← slow outputs → YOLO training labels
-        ├── calibrator.py        ← fixed camera rig from DUSt3R poses
-        ├── detector.py          ← YOLOv8 inference wrapper
-        ├── train.py             ← YOLOv8n training entry point
-        ├── triangulator.py      ← DLT triangulation: 2D boxes × rig → 3D
-        ├── connector.py         ← 3D proximity + slot rules → connection edges
-        ├── puml_generator.py    ← instance list + edges → PlantUML
-        ├── infer.py             ← end-to-end fast inference
-        ├── logs/
-        ├── calibration/rig_poses.pkl
-        ├── dataset/             ← YOLO-format training data (generated)
+    └── brio_fast_pipeline/      ← [WORK IN PROGRESS — not yet available]
+        ...                        fast inference pipeline (YOLOv8 + triangulation)
         └── outputs/
             └── sample_N/
                 ├── predicted.puml
@@ -170,50 +158,21 @@ python visualize_2d.py --sample 113
 python visualize.py --sample 113
 ```
 
-### Phase 2 — Export YOLO labels
+### Phases 2–5 — Fast pipeline (work in progress)
 
-```bash
-./labels.sh            # all completed samples
-./labels.sh 113 114   # specific samples only
-```
-
-### Phase 3 — Calibrate camera rig (once)
-
-```bash
-./calibrate.sh 113 114 115
-```
-
-Builds `brio_fast_pipeline/calibration/rig_poses.pkl` from DUSt3R pose outputs. More reference samples = more stable calibration. Only needs to run once.
-
-### Phase 4 — Train YOLOv8
-
-```bash
-./train.sh
-./train.sh --epochs 150 --batch 8   # optional overrides
-```
-
-Requires at least ~20 annotated samples. Weights saved to `brio_fast_pipeline/runs/detect/.../best.pt`.
-
-### Phase 5 — Fast inference
-
-```bash
-./infer.sh 120
-./infer.sh 120 --puml /mnt/c/BA/02-resources/data/constructions/Sample_120_InstanceDiagram/InstanceDiagramS120.puml
-```
-
-Produces `brio_fast_pipeline/outputs/sample_120/predicted.puml` in under 2 seconds.
+> **The fast pipeline (`brio_fast_pipeline/`) is not yet available.** Phases 2–5 (YOLO label export, camera rig calibration, YOLOv8 training, fast inference) are planned but not implemented. Only the slow pipeline (Phase 0 + Phase 1) is currently functional.
 
 ### Launcher scripts reference
 
-| Script | Arguments | What it does |
-|--------|-----------|--------------|
-| `slow.sh` | `<ids...> [--device cpu]` | Slow pipeline: annotate samples |
-| `train_classifier.sh` | `[--epochs N] [--batch N]` | Train MobileNetV3 visual classifier |
-| `visualize.sh` | `<id> [<run_name>]` | 3D/2D plots for one sample |
-| `labels.sh` | `[<ids...>]` | Export YOLO labels |
-| `calibrate.sh` | `<ids...>` | Build fixed camera rig |
-| `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n |
-| `infer.sh` | `<id> [--puml <path>]` | Fast inference on one sample |
+| Script | Arguments | What it does | Status |
+|--------|-----------|--------------|--------|
+| `slow.sh` | `<ids...> [--device cpu]` | Slow pipeline: annotate samples | available |
+| `train_classifier.sh` | `[--epochs N] [--batch N]` | Train MobileNetV3 visual classifier | available |
+| `visualize.sh` | `<id> [<run_name>]` | 3D/2D plots for one sample | available |
+| `labels.sh` | `[<ids...>]` | Export YOLO labels | work in progress |
+| `calibrate.sh` | `<ids...>` | Build fixed camera rig | work in progress |
+| `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n | work in progress |
+| `infer.sh` | `<id> [--puml <path>]` | Fast inference on one sample | work in progress |
 
 Logs are written automatically on every run — no manual redirection needed. Each script writes a timestamped `.log` file to the relevant `logs/` folder. To follow live:
 
@@ -241,19 +200,9 @@ outputs/run_NNN/sample_N/results.json
 Full technical documentation (every file, every function, known failure modes):  
 **[brio_pipeline/brio_3d_pipeline/README.md](brio_pipeline/brio_3d_pipeline/README.md)**
 
-### Fast pipeline (`brio_fast_pipeline/`) — sub-second inference
+### Fast pipeline (`brio_fast_pipeline/`) — work in progress
 
-```
-Training (once):
-  label_exporter.py → YOLO-format dataset from slow pipeline outputs
-  train.py          → fine-tune YOLOv8n from COCO weights
-
-Calibration (once):
-  calibrator.py     → fixed camera rig from DUSt3R poses
-
-Inference (< 2 seconds):
-  ~20 images → YOLOv8 detection → DLT triangulation → connection inference → PlantUML
-```
+Planned: YOLOv8n detection trained on slow pipeline labels + fixed camera rig triangulation for sub-second inference. Not yet implemented.
 
 ---
 
