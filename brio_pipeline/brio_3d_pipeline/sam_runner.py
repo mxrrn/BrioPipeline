@@ -30,7 +30,11 @@ from pathlib import Path
 import cv2
 
 
-_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+try:
+    from config import CLAHE_CLIP_LIMIT as _CLAHE_CLIP_LIMIT
+except ImportError:
+    _CLAHE_CLIP_LIMIT = 3.0
+_CLAHE = cv2.createCLAHE(clipLimit=_CLAHE_CLIP_LIMIT, tileGridSize=(8, 8))
 
 # Same threshold as preprocessor.BG_THRESHOLD — cropped images have a white
 # background (and white padding), so "non-white" is the foreground signal.

@@ -27,7 +27,11 @@ from sklearn.cluster import DBSCAN
 
 # Same CLAHE settings as sam_runner — keeps classifier crops visually consistent
 # with what SAM saw when generating the masks.
-_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+try:
+    from config import CLAHE_CLIP_LIMIT as _CLAHE_CLIP_LIMIT
+except ImportError:
+    _CLAHE_CLIP_LIMIT = 3.0
+_CLAHE = cv2.createCLAHE(clipLimit=_CLAHE_CLIP_LIMIT, tileGridSize=(8, 8))
 
 def _clahe_enhance(bgr: np.ndarray) -> np.ndarray:
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
@@ -63,6 +67,15 @@ def _extract_mask_cloud(pts3d_frame: np.ndarray, mask: np.ndarray,
         idx = np.random.choice(len(pts), _CLOUD_MAX_PTS, replace=False)
         pts = pts[idx]
     return pts
+
+
+def _compute_elongation(pts: np.ndarray) -> float:
+    """PCA elongation σ₁/σ₂ of a point cloud (≥1; 1 = isotropic, high = rod-like)."""
+    if len(pts) < 10:
+        return 1.0
+    centered = pts - pts.mean(0)
+    _, s, _ = np.linalg.svd(centered, full_matrices=False)
+    return float(s[0] / max(s[1], 1e-9))
 
 
 def _median_centroid(pts: np.ndarray) -> np.ndarray:
@@ -104,9 +117,11 @@ def _dbscan_cleanup(pts: np.ndarray,
     if len(pts) < min_samples * 2:
         return pts
 
-    # Subsample for DBSCAN to bound neighbour-list memory
+    # Subsample for DBSCAN to bound neighbour-list memory.
+    # Fixed seed ensures the same subsample on every run (reproducibility).
     if len(pts) > _DBSCAN_MAX_PTS:
-        sub_idx = np.random.choice(len(pts), _DBSCAN_MAX_PTS, replace=False)
+        rng     = np.random.default_rng(seed=42)
+        sub_idx = rng.choice(len(pts), _DBSCAN_MAX_PTS, replace=False)
         sub = pts[sub_idx]
     else:
         sub_idx = None
@@ -139,7 +154,9 @@ def _dbscan_cleanup(pts: np.ndarray,
 
 
 def _overlap_group(clouds: list[np.ndarray], n_target: int,
-                   overlap_min: float = 0.20, voxel_div: int = 40) -> np.ndarray:
+                   overlap_min: float = 0.20, voxel_div: int = 40,
+                   colours: np.ndarray | None = None,
+                   color_weight: float = 0.0) -> np.ndarray:
     """
     Group per-view mask clouds by 3D voxel overlap.
 
@@ -186,6 +203,17 @@ def _overlap_group(clouds: list[np.ndarray], n_target: int,
     n_groups = min(n_target, nv)
     dist = 1.0 - overlap
     np.fill_diagonal(dist, 0.0)
+
+    # Optional HSV colour repulsion: penalises merging differently-coloured clouds.
+    # L2 in normalised HSV ∈ [0,1]³; max distance = sqrt(3) ≈ 1.732.
+    if colours is not None and color_weight > 0 and nv > 1:
+        hsv_v = colours[np.array(valid)]   # (nv, 3)
+        for a in range(nv):
+            for b in range(a + 1, nv):
+                cd = float(np.linalg.norm(hsv_v[a] - hsv_v[b])) / 1.732
+                dist[a, b] += color_weight * cd
+                dist[b, a] += color_weight * cd
+
     lab_valid = AgglomerativeClustering(
         n_clusters=n_groups, metric="precomputed", linkage="average"
     ).fit_predict(dist)
@@ -305,14 +333,18 @@ def compute_proposals(dust3r_result: dict,
         classifier         : optional ComponentClassifier for visual voting
         conf_thresh        : minimum confidence to accept a visual prediction
 
-    Returns (clouds, visual_cls, cluster_colours):
-        clouds          : list of N (M_i, 3) world-space float32 arrays
-        visual_cls      : list of N dominant visual class codes (or None per cluster)
-        cluster_colours : list of N mean HSV (3,) float32 arrays in [0,1]
+    Returns (clouds, visual_cls, cluster_colours, cluster_elongations):
+        clouds               : list of N (M_i, 3) world-space float32 arrays
+        visual_cls           : list of N dominant visual class codes (or None per cluster)
+        cluster_colours      : list of N mean HSV (3,) float32 arrays in [0,1]
+        cluster_elongations  : list of N PCA elongation values (σ₁/σ₂, ≥1)
+
+    DBSCAN subsampling uses a fixed seed (42) so the output is reproducible;
+    without a seed, bbox-based features change across cache misses.
     """
     use_visual = classifier is not None
     cache_suffix = "_vis" if use_visual else ""
-    cache_file = output_dir / f"proposals_N{n_components}_v9{cache_suffix}.pkl"
+    cache_file = output_dir / f"proposals_N{n_components}_v12{cache_suffix}.pkl"
     if cache_file.exists():
         print(f"[Backproject] Loading cached proposals from {cache_file}")
         with open(cache_file, "rb") as f:
@@ -398,7 +430,9 @@ def compute_proposals(dust3r_result: dict,
     # ── 3D-overlap graph grouping ─────────────────────────────────────────
     labels = _overlap_group(all_clouds, n_components,
                             overlap_min=_cfg.OVERLAP_MIN,
-                            voxel_div=_cfg.OVERLAP_VOXEL_DIV)
+                            voxel_div=_cfg.OVERLAP_VOXEL_DIV,
+                            colours=colours_arr,
+                            color_weight=_cfg.COLOR_DIST_WEIGHT)
 
     # ── Merge + DBSCAN cleanup + visual majority vote ─────────────────────
     merged: list[np.ndarray] = []
@@ -440,7 +474,11 @@ def compute_proposals(dust3r_result: dict,
               f"centroid ({c[0]:+.4f}, {c[1]:+.4f}, {c[2]:+.4f})"
               + (f"  visual={vcls}" if vcls else ""))
 
-    result = (merged, visual_cls_per_cluster, cluster_colours)
+    cluster_elongations = [_compute_elongation(c) for c in merged]
+    for i, (e, pts) in enumerate(zip(cluster_elongations, merged)):
+        print(f"  Cluster {i}: elong={e:.2f}")
+
+    result = (merged, visual_cls_per_cluster, cluster_colours, cluster_elongations)
     with open(cache_file, "wb") as f:
         pickle.dump(result, f)
     print(f"[Backproject] Cached to {cache_file}")

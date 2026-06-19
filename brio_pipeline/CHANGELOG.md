@@ -4,9 +4,100 @@ Changes are listed in reverse chronological order. Each entry records the date, 
 
 ---
 
-## 2026-06-17
+## 2026-06-19 — Documentation: full README rewrite with per-file walkthrough
 
-### README, .gitignore — outputs tracking
+### Files touched
+- `brio_3d_pipeline/README.md`
+
+### Changes
+
+Complete rewrite of the pipeline README. The new version covers every file in `brio_3d_pipeline/` with:
+- Line-by-line explanation of each function's role and logic
+- Code snippets for all key operations (foreground detection, grid prompting, voxel overlap, cost matrix, elongation, amodal extension)
+- Concrete data-flow example walking through sample 113 from raw images to the wrong assignment
+- Failure-mode table cataloguing all 10 known root causes of wrong masking and assignment
+- Output structure and cache versioning guide
+
+---
+
+## 2026-06-18 — Classifier: elongation feature + DBSCAN determinism + blwo11 nominal fix
+
+### Files touched
+- `brio_3d_pipeline/backprojector.py`
+- `brio_3d_pipeline/classifier.py`
+- `brio_3d_pipeline/pipeline.py`
+
+### Changes
+
+**DBSCAN determinism** (`backprojector.py`):
+- `_dbscan_cleanup()` now seeds the subsampler with `np.random.default_rng(seed=42)` instead of the global state. Previously, every cache miss gave different point subsets → different bbox sizes → different classifier cost matrices. Cost matrices are now stable across regenerated proposals.
+- Proposals cache bumped from `_v10` → `_v12` (v11 = intermediate run without the seed fix).
+
+**Geometric elongation as classifier feature** (`backprojector.py`, `classifier.py`, `pipeline.py`):
+- `_compute_elongation(pts)`: new helper in backprojector; returns PCA σ₁/σ₂ of a cluster (1 = sphere, >5 = rod-like).
+- `compute_proposals()` now returns a 4-tuple `(clouds, visual_cls, cluster_colours, cluster_elongations)`. Cache version bumped accordingly.
+- `_NOMINAL_ELONG` dict in classifier.py: nominal PCA elongation for each BRIO class (rod≈6, screw≈2.5, block≈1.5, plate≈1.67, nut≈1.2, etc.). For digit-encoded classes not in the dict, the aspect ratio of the two largest digits is used (e.g. plpl53 → 5/3≈1.67).
+- `_nominal_elong(cls)` function: looks up `_NOMINAL_ELONG`, falls back to digit-ratio.
+- `assign_classes()`: new `cluster_elongations` and `elong_weight=1.0` params. Adds log-scale cost `elong_weight × |log(obs_elong) − log(nom_elong)|` to each cell. Log scale treats a rod-vs-block mismatch (log(6)−log(1.5)=1.4) much more severely than plate-vs-block (log(1.67)−log(1.5)=0.11), naturally penalising wrong class–cluster pairings without needing to tune absolute thresholds.
+
+**blwo11 nominal size fix** (`classifier.py`):
+- Added `"blwo11": 9.0, "blwo21": 7.0` to `_NOMINAL_NO_DIGITS`. The digit parser previously returned `max(1,1)=1` for "blwo11", causing the large windmill block to look tiny to the size metric and always lose to rods/plates. The nominal now reflects its physical footprint (large cross-shaped block > any rod).
+- `colour_weight` default: 1.5 → 2.5 (stronger colour signal to help distinguish blwo11 vs rome when both are near-white).
+
+### Why
+Run_022 regression analysis showed that with better reconstruction (32 multi-elevation views, finer voxels), the blwo11 windmill cross-block in sample 113 now correctly accumulates the most points (253K) and has a clear 3D shape — but the classifier still assigned it to `rome_1`. Root causes:
+
+1. `_nominal_size("blwo11")=1.0` (digit bug): even with 253K pts, blwo11 scored as the smallest nominal. Fixed by explicit dict entry.
+2. Non-deterministic DBSCAN: bbox changed between runs, making the cost matrix unstable. Fixed by seeding np.random.
+3. Through-joint occlusion: the rome rod passes entirely through blwo11, so its 3D cluster is compact (elong≈1.24) rather than elongated (expected ≈6). The elongation signal penalises assigning any low-elong cluster to a rod class, but since no cluster in sample 113 has high elong, the signal cannot determine where the rod went. This is a known fundamental limitation: heavily occluded through-joint rods cannot be distinctly reconstructed without depth priors or DINOv2 visual classification.
+
+### Known limitation (sample 113)
+The plpl53 plate has a larger 3D bbox than the blwo11 block in the reconstruction (DUSt3R scale is arbitrary and the flat plate spans a wider 3D extent). With `bbox_max` as the size metric and `blwo11=9.0` (largest nominal), the plate always grabs the blwo11 slot with size_cost=0 (perfect match). Neither colour nor elongation can overcome the 0-cost size advantage. The correct fix is DINOv2 visual classification (planned). Switching to `sqrt(n_pts)` obs_ext would fix sample 113 but breaks sample 114 (the stwo3 strap, which has the most points, incorrectly maps to plwo53, the largest nominal).
+
+---
+
+## 2026-06-17 — Occlusion & grouping improvements (run_022+)
+
+### Files touched
+- `brio_3d_pipeline/config.py`
+- `brio_3d_pipeline/sam_runner.py`
+- `brio_3d_pipeline/backprojector.py`
+- `brio_3d_pipeline/puml_parser.py`
+- `brio_3d_pipeline/pipeline.py`
+
+### Changes
+
+**voxel-overlap grouping refinements** (`backprojector.py`, `config.py`):
+- `OVERLAP_VOXEL_DIV` 40 → 80: smaller voxels so touching components (rod surface vs block face) no longer share the same hash bucket, reducing false inter-component links.
+- `OVERLAP_MIN` 0.20 → 0.15: compensates for the reduced per-voxel overlap that comes with finer voxels; intra-component cross-view links stay strong.
+- `COLOR_DIST_WEIGHT = 0.3`: adds an HSV repulsion term to the agglomerative distance matrix (`dist += color_weight * L2_HSV`). Differently-coloured touching parts (e.g. blue plate against white block) are now penalised from merging.
+- Proposals cache bumped from `_v9` to `_v10` so old caches are not reused.
+
+**Co-axial merge threshold** (`config.py`):
+- `COAXIAL_MIN_ELONG` 1.8 → 1.5: lets borderline rod fragments (short visible stubs with lower elongation) qualify for the merge.
+
+**Contrast enhancement** (`sam_runner.py`, `backprojector.py`, `config.py`):
+- `CLAHE_CLIP_LIMIT = 3.0` (was 2.0): stronger local contrast for thin rods and small components. Both sam_runner and backprojector read from config so they stay in sync.
+
+**Adaptive image stride** (`pipeline.py`, `config.py`):
+- `IMAGE_VIEWS_PER_RING = 8`: `collect_images()` now uses `stride = max(1, len(ring)//8)` per ring. Images90 (only 8 images) previously gave 2 top-down views at stride-4; now gives all 8. Total views per sample: ~32 (up from ~20). Requires a fresh DUSt3R run.
+
+**PUML through-joint connection parsing** (`puml_parser.py`):
+- `SampleManifest.thjo_pairs`: new field listing `(rod_instance_id, [through_instance_ids])` pairs, parsed from `&{thjo}` / `&{op}` Connection objects in the PUML.
+
+**Amodal bbox for through-joint rods** (`pipeline.py`):
+- `_amodal_extend_rods()`: post-assignment step that, for each thjo rod, merges the 3D clouds of the rod + all threaded components, finds the rod axis via PCA, then extends the AABB by `ROD_PROTRUSION_M = 0.030 m` on each end. Fixes the partial-rod bbox that results when only one rod end is reconstructed well.
+
+### Why
+Through-joint rods (e.g. `rome_1` in sample 113) were receiving only ~8 700 pts in a scattered, non-elongated cloud (elong=1.25) because:
+1. Rod-end voxels and block-face voxels shared the same 5 mm hash bucket (fixed by OVERLAP_VOXEL_DIV=80).
+2. Only 2/8 top-down images were used (fixed by adaptive stride).
+3. The co-axial merge threshold was too strict (fixed by COAXIAL_MIN_ELONG=1.5).
+4. Even when reconstruction is still partial, the amodal extension recovers a correct 3D bbox using the block's cloud + rod axis.
+
+---
+
+## 2026-06-17 — README, .gitignore — outputs tracking
 **Files:** `brio_3d_pipeline/README.md` *(new)*, `.gitignore`
 
 - **`README.md`** (new): full pipeline documentation — stage-by-stage explanation of preprocessor, DUSt3R, SAM prompted mode, backprojector, and classifier; how-to-run commands; output directory structure; config table; known limitations.

@@ -36,10 +36,47 @@ _NOMINAL_NO_DIGITS = {
     "rolo": 8.0, "rome": 6.0, "rosm": 4.0,      # rods long/medium/small
     "sclo": 4.0, "scme": 3.0, "scsm": 2.0,      # screws
     "nu": 1.2, "wa": 0.8, "pl": 1.0, "sl": 2.0, # nut, washer, plug, sleeve
-    "bo": 1.5,                                    # bolt: short thin cylinder — smaller than blwo21/plwo21
+    "bo": 1.5,                                    # bolt: short thin cylinder
     "no": 2.0, "ti": 3.0,                        # nose, tire
-    "whre": 2.0, "whwh": 2.0,                   # wheels
+    "whre": 2.0, "whwh": 2.0,                    # wheels
+    # blwo (block-windmill-opening) pieces: "11"/"21" encodes opening variant,
+    # NOT a size dimension.  Physical size >> any rod, so override the digit
+    # parser which would return max(1,1)=1 or max(2,1)=2.
+    "blwo11": 9.0, "blwo21": 7.0,
 }
+
+
+# ── Nominal elongation (σ₁/σ₂ PCA ratio) ────────────────────────────────────
+# Encodes how elongated each class is geometrically (1 = sphere, high = rod).
+# Used as a log-scale cost: |log(obs_elong) - log(nom_elong)|, which makes the
+# rod vs. block distinction very robust to size-metric failures.
+_NOMINAL_ELONG = {
+    # Rods: clearly elongated cylinders
+    "rolo": 8.0, "rome": 6.0, "rosm": 4.0,
+    # Screws: similarly elongated
+    "sclo": 4.0, "scme": 3.5, "scsm": 2.5,
+    # Straps: elongated flat strips (digit encodes hole count = length proxy)
+    "stwo3": 3.0, "stwo5": 5.0, "stwo7": 7.0, "stwo9": 9.0,
+    # Windmill blocks: cross-shaped, nearly isotropic (digits = opening variant)
+    "blwo11": 1.5, "blwo21": 1.6,
+    # Small round / thin hardware
+    "nu": 1.2, "wa": 1.1, "pl": 1.2, "sl": 2.5,
+    "bo": 2.0, "no": 2.0, "ti": 1.3, "whre": 1.3, "whwh": 1.3,
+}
+_DEFAULT_ELONG = 1.7   # used for digit-encoded plates (e.g. plpl53: 5/3 ≈ 1.67)
+
+
+def _nominal_elong(cls: str) -> float:
+    """Nominal PCA elongation (σ₁/σ₂) for a BRIO class."""
+    if cls in _NOMINAL_ELONG:
+        return _NOMINAL_ELONG[cls]
+    # Digit-encoded plates / blocks: long-side / short-side gives aspect ratio.
+    # E.g. plpl53 → digits [5,3] → 5/3 = 1.67; blwo21 → 2/1 handled by dict.
+    digits = [int(d) for d in re.findall(r"\d", cls)]
+    if len(digits) >= 2:
+        d = sorted(digits, reverse=True)
+        return max(float(d[0]) / max(float(d[1]), 1.0), 1.0)
+    return _DEFAULT_ELONG
 
 
 def _nominal_size(cls: str) -> float:
@@ -92,8 +129,10 @@ def assign_classes(proposals   : list[np.ndarray],
                    manifest_components: list,
                    visual_cls  : list[str | None] | None = None,
                    cluster_colours: list[np.ndarray] | None = None,
-                   colour_weight: float = 1.5,
+                   cluster_elongations: list[float] | None = None,
+                   colour_weight: float = 2.5,
                    size_weight  : float = 1.0,
+                   elong_weight : float = 1.0,
                    visual_mismatch_penalty: float = 8.0,
                    ) -> list["InstanceResult"]:
     """
@@ -114,15 +153,18 @@ def assign_classes(proposals   : list[np.ndarray],
         cluster_colours         : list of N mean observed HSV (3,) arrays in [0,1],
                                   used to compute colour distance to class prototypes
         colour_weight           : weight for colour distance term
+        elong_weight            : weight for elongation log-distance term
         visual_mismatch_penalty : cost added when visual_cls disagrees with manifest cls
 
     Returns list of N InstanceResult.
     """
+    import math
     n = len(proposals)
     assert n == len(manifest_components), \
         f"Proposal count {n} ≠ manifest count {len(manifest_components)}"
 
     have_colour = cluster_colours is not None
+    have_elong  = cluster_elongations is not None
 
     # Scale-free size features: observed max extent per proposal and nominal
     # size per manifest entry, each normalised by the in-sample maximum.
@@ -136,7 +178,8 @@ def assign_classes(proposals   : list[np.ndarray],
 
     cost = np.zeros((n, n), np.float32)
     for pi in range(n):
-        obs_hsv = cluster_colours[pi] if have_colour else None
+        obs_hsv   = cluster_colours[pi] if have_colour else None
+        obs_elong = cluster_elongations[pi] if have_elong else None
         for mi, comp in enumerate(manifest_components):
             proto = _colour_feature(comp.cls)
 
@@ -147,13 +190,22 @@ def assign_classes(proposals   : list[np.ndarray],
             s_cost = abs(float(rel_obs[pi]) - float(rel_nom[mi])) \
                      if obs_ext[pi] > 0 else 0.0
 
+            # Elongation mismatch: log-scale |log(obs) − log(nom)|.
+            # Separates rods (elong ≈ 6) from blocks (elong ≈ 1.5) even when
+            # the size metric fails due to plate bbox > block bbox.
+            e_cost = 0.0
+            if obs_elong is not None and obs_elong > 0:
+                nom_e = _nominal_elong(comp.cls)
+                e_cost = abs(math.log(max(obs_elong, 1.0)) - math.log(max(nom_e, 1.0)))
+
             # Visual mismatch penalty
             v_penalty = 0.0
             if visual_cls is not None and visual_cls[pi] is not None:
                 if visual_cls[pi] != comp.cls:
                     v_penalty = visual_mismatch_penalty
 
-            cost[pi, mi] = colour_weight * c_cost + size_weight * s_cost + v_penalty
+            cost[pi, mi] = (colour_weight * c_cost + size_weight * s_cost
+                            + elong_weight * e_cost + v_penalty)
 
     row_ind, col_ind = linear_sum_assignment(cost)
 

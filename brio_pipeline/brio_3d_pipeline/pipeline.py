@@ -57,20 +57,98 @@ def _make_run_dir() -> Path:
 
 def collect_images(sample_id: int) -> list[Path]:
     """
-    Sample every 4th image (stride=4) from every available elevation folder:
-    Images30, Images45, Images60, Images90.  Missing folders are silently skipped.
+    Collect up to IMAGE_VIEWS_PER_RING images from each available elevation ring
+    (Images30/45/60/90) using adaptive stride = max(1, len(ring)//target).
+
+    This ensures small rings (e.g. Images90 with only 8 images) contribute fully
+    while large rings (24 images) are still sub-sampled for DUSt3R budget.
+    Missing folders are silently skipped.
     """
-    base = cfg.MULTI_VIEW / f"Sample_{sample_id}"
-    imgs = []
+    base   = cfg.MULTI_VIEW / f"Sample_{sample_id}"
+    target = getattr(cfg, "IMAGE_VIEWS_PER_RING", 8)
+    imgs   = []
     for elev in ["Images30", "Images45", "Images60", "Images90"]:
         folder = base / elev
         if not folder.exists():
             continue
-        ring = sorted(folder.glob("*.jpg")) + sorted(folder.glob("*.JPG"))
-        imgs.extend(ring[::4])
+        ring   = sorted(folder.glob("*.jpg")) + sorted(folder.glob("*.JPG"))
+        stride = max(1, len(ring) // target)
+        imgs.extend(ring[::stride])
     if not imgs:
         raise FileNotFoundError(f"No images found for sample {sample_id}")
     return imgs
+
+
+def _amodal_extend_rods(results, proposals, thjo_pairs, protrusion_m: float) -> None:
+    """
+    For each through-joint rod (thjo_pairs from the PUML manifest), extend its
+    axis-aligned bbox to cover all components it passes through plus a fixed
+    protrusion on each end.
+
+    The rod axis is estimated from the rod's own point cloud (PCA principal axis).
+    If the rod cloud is too sparse (< 30 pts), the through-component's minor PCA
+    axis is used as a fallback (the rod goes through the thinnest dimension of the
+    block).  All changes are in-place on results[i].bbox_size / centroid.
+    """
+    import numpy as np
+    id_to_idx = {r.instance_id: i for i, r in enumerate(results)}
+
+    for rod_id, through_ids in thjo_pairs:
+        if rod_id not in id_to_idx:
+            continue
+        rod_idx  = id_to_idx[rod_id]
+        rod_pts  = proposals[rod_idx]
+
+        # Gather all 3D points: rod + every component it threads through
+        part_clouds = [rod_pts] if len(rod_pts) >= 10 else []
+        for tid in through_ids:
+            if tid in id_to_idx:
+                tp = proposals[id_to_idx[tid]]
+                if len(tp) >= 10:
+                    part_clouds.append(tp)
+        if not part_clouds:
+            continue
+
+        all_pts = np.concatenate(part_clouds, axis=0)
+
+        # Determine rod axis: prefer rod cloud PCA, fall back to through-comp minor axis
+        def _pca_axes(pts):
+            _, _, Vt = np.linalg.svd(pts - pts.mean(0), full_matrices=False)
+            return Vt   # rows are principal axes, descending variance
+
+        if len(rod_pts) >= 30:
+            rod_axis = _pca_axes(rod_pts)[0]
+        else:
+            # Use through-component's minor axis (rod goes through its thin dimension)
+            through_pts_list = [proposals[id_to_idx[tid]]
+                                for tid in through_ids if tid in id_to_idx
+                                and len(proposals[id_to_idx[tid]]) >= 30]
+            if through_pts_list:
+                through_pts = np.concatenate(through_pts_list)
+                rod_axis = _pca_axes(through_pts)[-1]  # minor axis = through direction
+            else:
+                rod_axis = _pca_axes(all_pts)[0]
+
+        # Project all assembly points onto the rod axis and extend by protrusion
+        origin  = all_pts.mean(axis=0)
+        proj    = (all_pts - origin) @ rod_axis
+        ext_lo  = float(proj.min()) - protrusion_m
+        ext_hi  = float(proj.max()) + protrusion_m
+
+        # Synthesise extended rod axis as a dense line, then compute AABB of (assembly + line)
+        t          = np.linspace(ext_lo, ext_hi, 50)
+        rod_line   = origin + np.outer(t, rod_axis)   # (50, 3)
+        combined   = np.vstack([all_pts, rod_line])
+        aabb_lo    = combined.min(axis=0)
+        aabb_hi    = combined.max(axis=0)
+
+        new_bbox  = (aabb_hi - aabb_lo).astype(np.float32)
+        new_cent  = ((aabb_lo + aabb_hi) / 2).astype(np.float32)
+
+        old_bbox  = results[rod_idx].bbox_size
+        print(f"[Amodal] {rod_id}: bbox {old_bbox.round(3)} → {new_bbox.round(3)}")
+        results[rod_idx].bbox_size = new_bbox
+        results[rod_idx].centroid  = new_cent
 
 
 # ── Per-sample processing ─────────────────────────────────────────────────────
@@ -137,7 +215,7 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
     )
 
     # ── Back-projection + clustering ─────────────────────────────────────
-    proposals, visual_cls, cluster_colours = compute_proposals(
+    proposals, visual_cls, cluster_colours, cluster_elongations = compute_proposals(
         dust3r_result, sam_masks, manifest.n_components,
         out_dir / "proposals",
         image_paths=img_paths,
@@ -147,7 +225,13 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
 
     # ── Classification ───────────────────────────────────────────────────
     results = assign_classes(proposals, manifest.components,
-                             visual_cls=visual_cls, cluster_colours=cluster_colours)
+                             visual_cls=visual_cls, cluster_colours=cluster_colours,
+                             cluster_elongations=cluster_elongations)
+
+    # ── Amodal bbox extension for through-joint rods ─────────────────────
+    if manifest.thjo_pairs:
+        _amodal_extend_rods(results, proposals, manifest.thjo_pairs,
+                            protrusion_m=cfg.ROD_PROTRUSION_M)
 
     # ── Report ───────────────────────────────────────────────────────────
     print(f"\n[Results] Sample {sample_id}")

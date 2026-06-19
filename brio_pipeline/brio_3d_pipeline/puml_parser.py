@@ -14,7 +14,10 @@ class Component:
 @dataclass
 class SampleManifest:
     sample_id: int
-    components: list  # list[Component]
+    components: list          # list[Component]
+    thjo_pairs: list = field(default_factory=list)
+    # thjo_pairs: list of (rod_instance_id, [through_instance_id, ...])
+    # A "thjo" (through-joint) rod passes through each listed {op} component.
 
     @property
     def n_components(self):
@@ -38,12 +41,25 @@ def parse_puml(puml_path: Path) -> SampleManifest:
     for cls, num in comp_pattern.findall(text):
         components.append(Component(cls=cls, instance_id=f"{cls}_{num}"))
 
+    # Parse through-joint connections: identify which rod goes through which component.
+    # Connection names look like: "blwo11_1&{op}_1#rome_1&{thjo}_1 : Connection"
+    conn_pattern = re.compile(
+        r'object\s+"(\w+_\d+)&\{(\w+)\}_\d+#(\w+_\d+)&\{(\w+)\}_\d+\s*:\s*Connection"'
+    )
+    thjo_map: dict[str, set] = {}
+    for c1, s1, c2, s2 in conn_pattern.findall(text):
+        if s2 == "thjo" and s1 == "op":
+            thjo_map.setdefault(c2, set()).add(c1)
+        elif s1 == "thjo" and s2 == "op":
+            thjo_map.setdefault(c1, set()).add(c2)
+    thjo_pairs = [(rod, sorted(through)) for rod, through in thjo_map.items()]
+
     # Extract sample number from filename (InstanceDiagramS113.puml)
     fname = Path(puml_path).stem  # "InstanceDiagramS113"
     match = re.search(r'S(\d+)', fname)
     sample_id = int(match.group(1)) if match else -1
 
-    return SampleManifest(sample_id=sample_id, components=components)
+    return SampleManifest(sample_id=sample_id, components=components, thjo_pairs=thjo_pairs)
 
 
 def find_puml(sample_id: int) -> Path:

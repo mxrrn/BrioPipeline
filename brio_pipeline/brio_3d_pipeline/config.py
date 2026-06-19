@@ -52,11 +52,24 @@ VOXEL_SIZE_BG        = 0.003   # voxel grid size (m) for background scene cloud
 VOXEL_SIZE_COMPONENT = 0.003   # voxel grid size (m) for component instance clouds
 
 # ── 3D-overlap instance grouping ─────────────────────────────────────────────
-OVERLAP_MIN          = 0.20    # min voxel-overlap ratio (∩ / smaller set) to link two masks
-OVERLAP_VOXEL_DIV    = 40      # voxel size = scene bbox diagonal / this divisor
+OVERLAP_MIN          = 0.15    # min voxel-overlap ratio (∩ / smaller set) to link two masks
+OVERLAP_VOXEL_DIV    = 80      # voxel size = scene bbox diagonal / this divisor
 
 # ── Co-axial rod fragment merging (purely geometric) ─────────────────────────
 MAX_ROD_GAP_M        = 0.12    # max gap (m) between co-axial fragments to merge (was 0.08)
 COAXIAL_ANGLE_DEG    = 20.0    # max angle (°) between PCA axes to be considered co-axial
 COAXIAL_MAX_OFFSET_M = 0.012   # max lateral offset (m) between the two fragment axes
-COAXIAL_MIN_ELONG    = 1.8     # min PCA elongation (σ1/σ2) for a cluster to count as a rod (was 2.5)
+COAXIAL_MIN_ELONG    = 1.5     # min PCA elongation (σ1/σ2) for a cluster to count as a rod (was 1.8)
+
+# ── CLAHE contrast enhancement ────────────────────────────────────────────────
+CLAHE_CLIP_LIMIT     = 3.0    # was 2.0 — higher local contrast helps thin rods
+
+# ── Color-distance modifier in 3D grouping ────────────────────────────────────
+COLOR_DIST_WEIGHT    = 0.3    # weight for HSV repulsion term in overlap grouping
+                              # (0 = off; helps separate differently-coloured touching parts)
+
+# ── Amodal bbox for through-joint rods ────────────────────────────────────────
+ROD_PROTRUSION_M     = 0.030  # estimated protrusion beyond each connected component (m)
+
+# ── Image sampling: target this many views per elevation ring ─────────────────
+IMAGE_VIEWS_PER_RING = 8      # stride = max(1, len(ring)//this); Images90 (8 imgs) → stride 1
