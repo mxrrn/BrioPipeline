@@ -16,3 +16,7 @@ brio_pipeline/brio_fast_pipeline/logs/
 # Model weights
 *.pth
 *.pt
+
+# Personal / thesis documents
+thesis_paper.md
+brio_pipeline/CHANGELOG.md
