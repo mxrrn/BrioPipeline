@@ -229,6 +229,8 @@ This is critical on the 8 GB RTX 2070 Super — without it, SAM competes for the
 
 **Failure modes**:
 - **Arbitrary scale**: The reconstruction scale is different for every sample and even between runs on the same sample (global alignment can converge to a different scale). All downstream features are therefore normalised per-sample, but this normalisation assumes the ranking of sizes is preserved — which fails when a flat plate reconstructs with a larger 3D bbox than a compact block.
+    - Clarification: when DUST3R reconstructs a scene from images, it does not know what "10cm" is. It only sees pixel relationships between images. The output cloud lives in some abstract coordinate space where 1 unit could be 10cm or 10m. Two runs of the same sample can produce two differently scaled output point clouds - which remains valid because the global alignment optimisation (the iterative step that stitches all pairwise predictions into one coordinate frame) can converge to a different scale depending on which pairs were processed, the random initialisation, and numerical noise
+    - Normalizing the sizes across samples will therefore maintain the sizes of a component occuring in a construction which is especially useful if we have more than one occurance of the component in a certain sample
 - **niter=100**: Lower than the DUSt3R demo default (~300). Convergence may be incomplete on assemblies with many occluded regions, producing noisier point clouds.
 - **logwin misses some pairs**: If a rod only appears clearly in 2 images that happen to not be paired in logwin, its geometry is weakly constrained and may reconstruct poorly.
 
