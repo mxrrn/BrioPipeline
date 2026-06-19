@@ -20,3 +20,7 @@ brio_pipeline/brio_fast_pipeline/logs/
 # Personal / thesis documents
 thesis_paper.md
 brio_pipeline/CHANGELOG.md
+
+# Untracked pipeline directories
+brio_pipeline/brio_fast_pipeline/
+brio_pipeline/brio_annotator/
