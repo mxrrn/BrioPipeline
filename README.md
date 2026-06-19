@@ -66,103 +66,233 @@ Construction
 
 ---
 
-## Implemented Solution
-
-The implemented system is a two-stage pipeline.  
-Full documentation: **[brio_pipeline/README.md](brio_pipeline/README.md)**
-
-### Stage 1 — Slow Annotation Pipeline (`brio_pipeline/brio_3d_pipeline/`)
-
-Runs once per sample to produce 3D ground-truth labels for training. Runtime ~35 minutes per sample on GPU (cold), ~2 minutes with cache.
-
-```
-~20 multi-view images (all 4 elevation rings, stride 4)
-  ↓  CLAHE enhancement — boosts local contrast for white components
-  ↓  DUSt3R (ViT-L) — uncalibrated multi-view 3D reconstruction
-  ↓  SAM (ViT-B)    — automatic mask generation (top-N per image)
-  ↓  Back-projection — SAM masks × pts3d → ~20N raw 3D clouds
-  ↓  Ward clustering + sigma cleanup → N instance clouds
-  ↓  Visual classifier (MobileNetV3-small) — majority-votes class per cluster
-  ↓  Hungarian assignment (visual + colour cost) → class label per cloud
-outputs/run_NNN_YYYYMMDD_HHMM/sample_N/results.json
-```
-
-Outputs feed directly into Stage 2 as YOLO training labels.
-
-### Stage 2 — Fast Inference Pipeline (`brio_pipeline/brio_fast_pipeline/`)
-
-Trained on Stage 1 labels. Inference is under 2 seconds per sample on GPU.
-
-```
-Training (once):
-  label_exporter.py  →  YOLO-format dataset from Stage 1 outputs
-  train.py           →  fine-tunes YOLOv8n from COCO pretrained weights
-
-Calibration (once):
-  calibrator.py      →  fixed camera rig from DUSt3R poses (normalised, averaged)
-
-Inference:
-  ~20 images → YOLOv8 detection → DLT triangulation → connection inference → PlantUML
-```
-
-### Launcher scripts
-
-All phases are run from `brio_pipeline/` with short commands:
-
-| Command | What it does |
-|---------|--------------|
-| `./slow.sh 113 114 115` | Annotate samples with the slow pipeline |
-| `./train_classifier.sh` | Train the component visual classifier (run once before slow pipeline) |
-| `./labels.sh` | Export YOLO labels from completed samples |
-| `./calibrate.sh 113` | Build fixed camera rig calibration |
-| `./train.sh` | Train YOLOv8n |
-| `./infer.sh 120` | Run fast inference on a sample |
-| `./visualize.sh 113` | 3D scatter plot of instance clouds |
-
-Logs are written automatically on every run.
-
----
-
 ## Repository Layout
 
 ```
 00-project/
-├── README.md               ← this file
+├── README.md                    ← this file
+├── CHANGELOG.md
 ├── .gitignore
 │
-├── brio_pipeline/          ← both pipelines + launcher scripts
-│   ├── README.md           ← full pipeline documentation
-│   ├── slow.sh / train_classifier.sh / infer.sh / train.sh / ...
-│   ├── brio_3d_pipeline/   ← slow annotation pipeline (source code)
-│   │   ├── pipeline.py
-│   │   ├── config.py
-│   │   ├── backprojector.py
-│   │   ├── classifier.py
-│   │   ├── component_classifier.py   ← MobileNetV3-small visual classifier
-│   │   ├── component_map.py
-│   │   ├── component_classifier.pth  ← trained weights (git-ignored)
-│   │   └── ...
-│   └── brio_fast_pipeline/ ← fast inference pipeline
-│       ├── infer.py
-│       ├── train.py
-│       └── ...
-│
-└── sam_trials/             ← earlier SAM integration experiments
+└── brio_pipeline/               ← all code + launcher scripts
+    ├── slow.sh                  ← annotate samples with the slow pipeline
+    ├── train_classifier.sh      ← train the component visual classifier (once)
+    ├── visualize.sh             ← 3D/2D visualisation
+    ├── labels.sh                ← export YOLO labels from slow outputs
+    ├── calibrate.sh             ← build fixed camera rig calibration (once)
+    ├── train.sh                 ← train YOLOv8n
+    ├── infer.sh                 ← fast inference on a sample
+    │
+    ├── brio_3d_pipeline/        ← slow annotation pipeline (main system)
+    │   ├── README.md            ← full technical documentation (start here)
+    │   ├── pipeline.py          ← entry point
+    │   ├── config.py            ← all paths and hyperparameters
+    │   ├── puml_parser.py       ← reads ground-truth component manifest
+    │   ├── preprocessor.py      ← fixed-scale crop around the construction
+    │   ├── dust3r_runner.py     ← dense 3D reconstruction (DUSt3R ViT-L)
+    │   ├── sam_runner.py        ← 2D instance masks (SAM ViT-B)
+    │   ├── backprojector.py     ← 3D point clouds + voxel-overlap clustering
+    │   ├── classifier.py        ← Hungarian assignment to PUML components
+    │   ├── component_classifier.py   ← MobileNetV3 visual classifier
+    │   ├── component_map.py     ← folder→class mapping + HSV prototypes
+    │   ├── logger.py            ← auto timestamped logging
+    │   ├── visualize_2d.py      ← 2D mask overlay per component
+    │   ├── visualize.py         ← 3D point cloud export (PLY + PNG)
+    │   ├── logs/                ← one .log per run (auto-created)
+    │   └── outputs/
+    │       └── run_NNN_YYYYMMDD_HHMM/
+    │           └── sample_N/
+    │               ├── image_order.json
+    │               ├── cropped/          ← fixed-scale crops
+    │               ├── dust3r/           ← pts3d cache
+    │               ├── sam/              ← mask cache
+    │               ├── proposals/        ← 3D cluster cache
+    │               ├── results.json      ← final assignment
+    │               ├── viz_2d.png
+    │               └── viz_3d.ply
+    │
+    └── brio_fast_pipeline/      ← [WORK IN PROGRESS — not yet available]
+        ...                        fast inference pipeline (YOLOv8 + triangulation)
+        └── outputs/
+            └── sample_N/
+                ├── predicted.puml
+                └── results.json
 ```
 
-> **Note:** `brio_pipeline/brio_3d_pipeline/outputs/` (DUSt3R/SAM caches, ~37 MB per sample) and `component_classifier.pth` are excluded from git via `.gitignore`. Run `./train_classifier.sh` once to produce the weights, then `./slow.sh <sample_ids>` to regenerate outputs.
+> **Note:** `outputs/` (DUSt3R/SAM caches, ~37 MB per sample) and `component_classifier.pth` are excluded from git via `.gitignore`.
 
 ---
 
-## Environment
+## How to Run
 
-- Python 3.10, conda env `brio-3d`
-- PyTorch + CUDA 12.4 (`cu124`) on RTX 2070 Super (8 GB)
-- DUSt3R (ViT-L, `07-dust3r/`), SAM ViT-B, YOLOv8n (ultralytics)
-- MobileNetV3-small (torchvision, ImageNet pretrained)
-- WSL2 on Windows 11
+All commands run from `brio_pipeline/`:
 
-Setup instructions: [brio_pipeline/README.md § Environment Setup](brio_pipeline/README.md#10-environment-setup)
+```bash
+conda activate brio-3d
+cd /mnt/c/BA/00-project/brio_pipeline
+```
+
+### Phase 0 — Train the visual classifier (once)
+
+```bash
+./train_classifier.sh
+```
+
+Trains MobileNetV3-small on isolated component images (~40 epochs, ~10 min GPU). Saves weights to `brio_3d_pipeline/component_classifier.pth`. Run once; retrain only if the component dataset changes.
+
+### Phase 1 — Annotate samples (slow pipeline)
+
+```bash
+./slow.sh 113 114 115
+```
+
+Runs the full slow pipeline: CLAHE → DUSt3R → SAM → 3D clustering → Hungarian assignment. Creates a new timestamped output folder per run. First run: ~43 min/sample. Re-runs with cache: ~2 min/sample.
+
+```bash
+# Resume from an existing run (reuses DUSt3R and SAM caches):
+cd brio_3d_pipeline
+python pipeline.py --samples 113 --resume run_021_20260616_2339
+
+# Visualise results:
+python visualize_2d.py --sample 113
+python visualize.py --sample 113
+```
+
+### Phases 2–5 — Fast pipeline (work in progress)
+
+> **The fast pipeline (`brio_fast_pipeline/`) is not yet available.** Phases 2–5 (YOLO label export, camera rig calibration, YOLOv8 training, fast inference) are planned but not implemented. Only the slow pipeline (Phase 0 + Phase 1) is currently functional.
+
+### Launcher scripts reference
+
+| Script | Arguments | What it does | Status |
+|--------|-----------|--------------|--------|
+| `slow.sh` | `<ids...> [--device cpu]` | Slow pipeline: annotate samples | available |
+| `train_classifier.sh` | `[--epochs N] [--batch N]` | Train MobileNetV3 visual classifier | available |
+| `visualize.sh` | `<id> [<run_name>]` | 3D/2D plots for one sample | available |
+| `labels.sh` | `[<ids...>]` | Export YOLO labels | work in progress |
+| `calibrate.sh` | `<ids...>` | Build fixed camera rig | work in progress |
+| `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n | work in progress |
+| `infer.sh` | `<id> [--puml <path>]` | Fast inference on one sample | work in progress |
+
+Logs are written automatically on every run — no manual redirection needed. Each script writes a timestamped `.log` file to the relevant `logs/` folder. To follow live:
+
+```bash
+tail -f brio_3d_pipeline/logs/20260618_222000_samples_113.log
+```
+
+---
+
+## Pipeline Overview
+
+### Slow pipeline (`brio_3d_pipeline/`) — produces 3D ground-truth labels
+
+```
+~32 multi-view images (4 elevation rings, adaptive stride)
+  ↓  puml_parser.py   — read component manifest from PUML
+  ↓  preprocessor.py  — fixed-scale crop centred on the LCC
+  ↓  dust3r_runner.py — dense 3D reconstruction (pts3d per pixel)
+  ↓  sam_runner.py    — SAM prompted mode: tight-crop + fg-grid prompts
+  ↓  backprojector.py — masks × pts3d → 3D clouds → voxel-overlap clustering
+  ↓  classifier.py    — Hungarian assignment: colour + size + elongation costs
+outputs/run_NNN/sample_N/results.json
+```
+
+Full technical documentation (every file, every function, known failure modes):  
+**[brio_pipeline/brio_3d_pipeline/README.md](brio_pipeline/brio_3d_pipeline/README.md)**
+
+### Fast pipeline (`brio_fast_pipeline/`) — work in progress
+
+Planned: YOLOv8n detection trained on slow pipeline labels + fixed camera rig triangulation for sub-second inference. Not yet implemented.
+
+---
+
+## Environment Setup
+
+Hardware: RTX 2070 Super (8 GB VRAM), WSL2 on Windows 11, CUDA driver 12.7.
+
+### Why cu124 and not cu130
+
+The CUDA driver version reported by `nvidia-smi` is the *maximum* CUDA version the driver supports — not the version PyTorch must be built against. Installing `torch+cu130` on a 12.7 driver raises a silent `CUDA initialization` error and falls back to CPU.
+
+```bash
+nvidia-smi   # top-right corner: "CUDA Version: 12.7"
+```
+
+Always match the `+cuXXX` suffix to the driver version or lower. `cu124` is the highest stable PyTorch build compatible with CUDA 12.7.
+
+### Install
+
+```bash
+conda create -n brio-3d python=3.10 -y
+conda activate brio-3d
+
+# PyTorch — cu124, not cu130 (see above)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# DUSt3R dependencies (repo added to sys.path at runtime, not installed as a package)
+pip install -r /mnt/c/BA/07-dust3r/requirements.txt
+
+# SAM
+pip install git+https://github.com/facebookresearch/segment-anything.git
+
+# Core
+pip install roma einops trimesh scipy tqdm huggingface-hub \
+            opencv-python scikit-learn matplotlib pillow
+
+# Fast pipeline
+pip install ultralytics
+```
+
+### Verify GPU
+
+```bash
+python -c "
+import torch
+print('torch:', torch.__version__)           # 2.6.0+cu124
+print('CUDA:', torch.cuda.is_available())    # True
+print('GPU:', torch.cuda.get_device_name(0)) # NVIDIA GeForce RTX 2070 Super
+"
+```
+
+### Verify DUSt3R
+
+```bash
+python -c "
+import sys; sys.path.insert(0, '/mnt/c/BA/07-dust3r')
+from dust3r.inference import inference
+from dust3r.model import AsymmetricCroCo3DStereo
+from dust3r.cloud_opt import global_aligner, GlobalAlignerMode
+print('DUSt3R OK')
+"
+```
+
+You will see a `Warning, cannot find cuda-compiled version of RoPE2D` message. This is harmless — the pipeline uses the pure-PyTorch fallback, which is slightly slower but fully correct. Compiling the CUDA extension is not needed.
+
+### Weights
+
+**SAM ViT-B** (download once):
+```bash
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth \
+     -O /mnt/c/BA/03-code/sam_weights/sam_vit_b_01ec64.pth
+```
+
+**DUSt3R ViT-L** downloads automatically from HuggingFace on first use (~1.6 GB, cached in `~/.cache/huggingface/`).
+
+**Classifier weights** are produced by `./train_classifier.sh` (run once, ~10 min).
+
+### VRAM usage by stage
+
+| Stage | Peak VRAM | Notes |
+|-------|-----------|-------|
+| DUSt3R (batch=1) | ~4–6 GB | Freed before SAM starts |
+| SAM ViT-B | ~4 GB | |
+| Back-projection + clustering | CPU only | |
+| Hungarian assignment | CPU only | |
+
+DUSt3R and SAM never run simultaneously — GPU memory is freed between stages (`del model; torch.cuda.empty_cache()`).
+
+**If DUSt3R OOMs:** reduce `DUST3R_SIZE = 384` in `config.py`, or drop to fewer images per ring (`IMAGE_VIEWS_PER_RING = 6`).  
+**If SAM OOMs:** switch to `SAM_MODEL_TYPE = "vit_b"` (already default) or reduce `SAM_POINTS_SIDE`.
 
 ---
 
