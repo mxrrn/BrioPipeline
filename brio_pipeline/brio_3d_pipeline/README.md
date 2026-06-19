@@ -232,8 +232,12 @@ This is critical on the 8 GB RTX 2070 Super — without it, SAM competes for the
     - Clarification: when DUST3R reconstructs a scene from images, it does not know what "10cm" is. It only sees pixel relationships between images. The output cloud lives in some abstract coordinate space where 1 unit could be 10cm or 10m. Two runs of the same sample can produce two differently scaled output point clouds - which remains valid because the global alignment optimisation (the iterative step that stitches all pairwise predictions into one coordinate frame) can converge to a different scale depending on which pairs were processed, the random initialisation, and numerical noise
     - Normalizing the sizes across samples will therefore maintain the sizes of a component occuring in a construction which is especially useful if we have more than one occurance of the component in a certain sample
 - **niter=100**: Lower than the DUSt3R demo default (~300). Convergence may be incomplete on assemblies with many occluded regions, producing noisier point clouds.
-- **logwin misses some pairs**: If a rod only appears clearly in 2 images that happen to not be paired in logwin, its geometry is weakly constrained and may reconstruct poorly.
-
+- **logwin misses some pairs**: If a rod only appears clearly in 2 images that happen to not be
+ paired in logwin, its geometry is weakly constrained and may reconstruct poorly.
+    - Clarification: DUSt3R doesn't process every possible image pair — with 20 images that would be 190 pairs, scaling as O(N²). Instead it uses a logarithmic window strategy: each image is paired with its nearest neighbours in the sequence, plus a few images spaced logarithmically further away.
+    - The pairing is based on index order in the sequence, not on visual content. Consider a thin rod that is only visible at two specific azimuths — assume it sticks out sideways and is only clearly segmented in image 3 and image 41. Whether those two images are ever paired depends entirely on whether 41 is within logwin's reach of 3.
+    - The result: the rod either doesn't form a clean proposal cluster (agglomerative clustering groups it with something else), or its centroid lands in empty space, and the classifier's visual crop hits background pixels instead of the rod.
+     
 ---
 
 ### `sam_runner.py` — 2D instance mask generation
