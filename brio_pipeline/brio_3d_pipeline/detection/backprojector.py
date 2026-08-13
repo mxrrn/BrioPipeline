@@ -18,6 +18,7 @@ Grouping (v7)
 * Optional ComponentClassifier: predicts the class of each SAM mask crop,
   then majority-votes per group to produce a visual class label.
 """
+import json
 import pickle
 import numpy as np
 import cv2
@@ -100,6 +101,40 @@ def _mean_hsv(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return (mean / np.array([180., 255., 255.])).astype(np.float32)
 
 
+# ── Debug helpers ────────────────────────────────────────────────────────────
+
+def _distinct_colors(n: int) -> np.ndarray:
+    """n visually distinct RGB colours in [0,1] via an evenly-spaced hue wheel."""
+    if n <= 0:
+        return np.zeros((0, 3), np.float32)
+    hsv = np.zeros((1, n, 3), np.float32)
+    hsv[0, :, 0] = np.linspace(0, 360, n, endpoint=False)
+    hsv[0, :, 1] = 0.75
+    hsv[0, :, 2] = 0.95
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0].astype(np.float32)
+
+
+def _save_debug_ply(clouds: list[np.ndarray], out_path: Path) -> None:
+    """Write `clouds` as one point cloud, each cloud coloured distinctly, for
+    visual inspection in visualize.py or any point-cloud viewer."""
+    import open3d as o3d
+    colours = _distinct_colors(len(clouds))
+    pts_list, col_list = [], []
+    for i, c in enumerate(clouds):
+        if len(c) == 0:
+            continue
+        pts_list.append(c)
+        col_list.append(np.tile(colours[i], (len(c), 1)))
+    if not pts_list:
+        return
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.concatenate(pts_list).astype(np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(np.concatenate(col_list).astype(np.float64))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    o3d.io.write_point_cloud(str(out_path), pcd)
+    print(f"[Backproject] Debug point cloud → {out_path} ({len(pcd.points)} pts, {len(pts_list)} groups)")
+
+
 _DBSCAN_MAX_PTS = 20_000   # subsample cap to keep DBSCAN memory O(n), not O(n²)
 
 
@@ -156,7 +191,9 @@ def _dbscan_cleanup(pts: np.ndarray,
 def _overlap_group(clouds: list[np.ndarray], n_target: int,
                    overlap_min: float = 0.20, voxel_div: int = 40,
                    colours: np.ndarray | None = None,
-                   color_weight: float = 0.0) -> np.ndarray:
+                   color_weight: float = 0.0,
+                   provenance: list[tuple[int, int]] | None = None,
+                   debug_dir: Path | None = None) -> np.ndarray:
     """
     Group per-view mask clouds by 3D voxel overlap.
 
@@ -230,6 +267,33 @@ def _overlap_group(clouds: list[np.ndarray], n_target: int,
     linked = int((overlap > 0).sum() // 2)
     print(f"[Backproject] Overlap clustering: {nv} clouds, {linked} links "
           f"→ {n_groups} groups (avg-linkage, voxel={voxel*1000:.1f} mm)")
+
+    if debug_dir is not None:
+        def _node(i: int) -> dict:
+            node = {"cloud_idx": i, "n_points": len(clouds[i]), "group": int(labels[i])}
+            if provenance is not None and i < len(provenance):
+                node["view"], node["mask_idx"] = provenance[i]
+            return node
+
+        edges = []
+        for a in range(nv):
+            for b in range(a + 1, nv):
+                if overlap[a, b] > 0:
+                    edges.append({"a": valid[a], "b": valid[b], "overlap": float(overlap[a, b])})
+
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        with open(debug_dir / "overlap_graph.json", "w") as f:
+            json.dump({
+                "voxel_size_mm": voxel * 1000,
+                "overlap_min": overlap_min,
+                "n_target": n_target,
+                "n_groups": n_groups,
+                "nodes": [_node(i) for i in range(K)],
+                "edges": edges,
+            }, f, indent=2)
+        print(f"[Backproject] Debug overlap graph → {debug_dir / 'overlap_graph.json'} "
+              f"({len(edges)} edges)")
+
     return labels
 
 
@@ -240,6 +304,7 @@ def _coaxial_merge(
     angle_deg   : float,
     max_offset_m: float = 0.012,
     min_elong   : float = 2.5,
+    debug_dir   : Path | None = None,
 ) -> tuple[list[np.ndarray], list[str | None]]:
     """
     Merge pairs of clusters that are co-axial fragments of the same rod.
@@ -258,6 +323,12 @@ def _coaxial_merge(
     (it still occupies a slot so the Hungarian assignment keeps N clusters).
     """
     n = len(clouds)
+    merge_records: list[dict] = []
+    # Pairs that cleared the elongation+angle gates (i.e. looked like two rod
+    # fragments pointing the same way) but were rejected on offset and/or gap.
+    # Logged separately from merges because a rod that SHOULD have rejoined
+    # but didn't produces no print/record otherwise — a silent miss.
+    near_misses: list[dict] = []
 
     def _pca(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
         """Return (mean, principal axis, elongation σ1/σ2)."""
@@ -283,18 +354,24 @@ def _coaxial_merge(
             axis = ai
             d    = cj - ci
             lat  = float(np.linalg.norm(d - np.dot(d, axis) * axis))
-            if lat > max_offset_m:
-                continue
+            offset_ok = lat <= max_offset_m
 
             proj_i = pi @ axis
             proj_j = pj @ axis
             lo_all = min(proj_i.min(), proj_j.min())
             hi_all = max(proj_i.max(), proj_j.max())
-            span   = hi_all - lo_all
-            gap    = max(0.0, max(proj_i.min(), proj_j.min())
-                             - min(proj_i.max(), proj_j.max()))
+            span   = float(hi_all - lo_all)
+            gap    = float(max(0.0, max(proj_i.min(), proj_j.min())
+                                   - min(proj_i.max(), proj_j.max())))
+            gap_ok = gap <= max_gap_m and gap <= 0.5 * span
 
-            if gap > max_gap_m or gap > 0.5 * span:
+            if not (offset_ok and gap_ok):
+                failed = [g for g, ok in (("offset", offset_ok), ("gap", gap_ok)) if not ok]
+                near_misses.append({
+                    "i": i, "j": j, "elong_i": ei, "elong_j": ej,
+                    "lateral_offset_mm": lat * 1000, "gap_m": gap, "span_m": span,
+                    "failed_gates": failed,
+                })
                 continue
 
             # Absorb smaller cloud into larger; zero out smaller slot
@@ -307,6 +384,25 @@ def _coaxial_merge(
             print(f"[Backproject] Co-axial merge: cluster {src} → {dst}  "
                   f"elong=({ei:.1f},{ej:.1f})  lat={lat*1000:.1f} mm  "
                   f"gap={gap:.3f} m  span={span:.3f} m")
+            merge_records.append({
+                "src": src, "dst": dst,
+                "elong_src": ej if src == j else ei,
+                "elong_dst": ei if src == j else ej,
+                "lateral_offset_mm": lat * 1000,
+                "gap_m": gap, "span_m": span,
+            })
+
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        with open(debug_dir / "coaxial_merges.json", "w") as f:
+            json.dump({
+                "max_gap_m": max_gap_m, "angle_deg": angle_deg,
+                "max_offset_m": max_offset_m, "min_elong": min_elong,
+                "merges": merge_records,
+                "near_misses": near_misses,
+            }, f, indent=2)
+        print(f"[Backproject] Debug coaxial merges → {debug_dir / 'coaxial_merges.json'} "
+              f"({len(merge_records)} merges, {len(near_misses)} near-misses)")
 
     return clouds, visual_cls
 
@@ -320,6 +416,7 @@ def compute_proposals(dust3r_result: dict,
                       image_paths: list[Path] | None = None,
                       classifier=None,
                       conf_thresh: float = 0.40,
+                      debug_dir: Path | None = None,
                       ) -> tuple[list[np.ndarray], list[str | None], list[np.ndarray]]:
     """
     SAM masks × DUSt3R pts3d → N merged + cleaned 3D instance point clouds.
@@ -332,6 +429,10 @@ def compute_proposals(dust3r_result: dict,
         image_paths        : original (cropped) image paths for colour extraction
         classifier         : optional ComponentClassifier for visual voting
         conf_thresh        : minimum confidence to accept a visual prediction
+        debug_dir           : if given, dump per-stage debug artifacts (overlap
+                              graph, cluster assignment, coaxial merges, coloured
+                              .ply clouds) — also bypasses the proposals cache so
+                              debug runs always reflect the current inputs
 
     Returns (clouds, visual_cls, cluster_colours, cluster_elongations):
         clouds               : list of N (M_i, 3) world-space float32 arrays
@@ -345,7 +446,7 @@ def compute_proposals(dust3r_result: dict,
     use_visual = classifier is not None
     cache_suffix = "_vis" if use_visual else ""
     cache_file = output_dir / f"proposals_N{n_components}_v12{cache_suffix}.pkl"
-    if cache_file.exists():
+    if cache_file.exists() and debug_dir is None:
         print(f"[Backproject] Loading cached proposals from {cache_file}")
         with open(cache_file, "rb") as f:
             return pickle.load(f)
@@ -366,6 +467,7 @@ def compute_proposals(dust3r_result: dict,
     all_centroids : list[np.ndarray]  = []   # 3D centroid (3,)
     all_colours   : list[np.ndarray]  = []   # mean HSV   (3,)
     all_visual_cls: list[str | None]  = []   # per-mask visual prediction (filled after batch)
+    all_provenance: list[tuple[int, int]] = []   # (view_idx, mask_idx_in_view) per cloud
 
     # Crop collection for batched classifier inference
     pending_crops : list[np.ndarray] = []   # BGR crops awaiting prediction
@@ -384,7 +486,7 @@ def compute_proposals(dust3r_result: dict,
                 bgr     = _clahe_enhance(bgr_raw)
                 img_rgb = cv2.cvtColor(bgr_raw, cv2.COLOR_BGR2RGB)
 
-        for mask_dict in masks:
+        for mask_idx, mask_dict in enumerate(masks):
             seg = mask_dict["segmentation"]
             pts = _extract_mask_cloud(p3d, seg, conf=conf, conf_thresh=conf_thresh)
             if len(pts) < 20:
@@ -396,6 +498,7 @@ def compute_proposals(dust3r_result: dict,
             colour = _mean_hsv(img_rgb, seg) if img_rgb is not None else np.zeros(3, np.float32)
             all_colours.append(colour)
             all_visual_cls.append(None)  # placeholder — filled below
+            all_provenance.append((img_idx, mask_idx))
 
             # Collect crop for batched inference.
             # Skip if crop too small (<32 px shortest side).
@@ -421,8 +524,12 @@ def compute_proposals(dust3r_result: dict,
             all_centroids.append(np.zeros(3, np.float32))
             all_colours.append(np.zeros(3, np.float32))
             all_visual_cls.append(None)
+            all_provenance.append((-1, -1))   # padded slot — no source view/mask
 
     colours_arr = np.array(all_colours, np.float32)   # (K, 3)
+
+    if debug_dir is not None:
+        _save_debug_ply(all_clouds, debug_dir / "raw_by_mask.ply")
 
     print(f"[Backproject] Grouping {len(all_clouds)} clouds into ≤{n_components} "
           f"instances via 3D voxel overlap")
@@ -432,12 +539,15 @@ def compute_proposals(dust3r_result: dict,
                             overlap_min=_cfg.OVERLAP_MIN,
                             voxel_div=_cfg.OVERLAP_VOXEL_DIV,
                             colours=colours_arr,
-                            color_weight=_cfg.COLOR_DIST_WEIGHT)
+                            color_weight=_cfg.COLOR_DIST_WEIGHT,
+                            provenance=all_provenance,
+                            debug_dir=debug_dir)
 
     # ── Merge + DBSCAN cleanup + visual majority vote ─────────────────────
     merged: list[np.ndarray] = []
     visual_cls_per_cluster: list[str | None] = []
     cluster_colours: list[np.ndarray] = []
+    cluster_debug_records: list[dict] = []
 
     for cid in range(n_components):
         idx   = np.where(labels == cid)[0]
@@ -457,6 +567,24 @@ def compute_proposals(dust3r_result: dict,
         dominant = Counter(votes).most_common(1)[0][0] if votes else None
         visual_cls_per_cluster.append(dominant)
 
+        if debug_dir is not None:
+            cluster_debug_records.append({
+                "cluster_id": cid,
+                "raw_members": [
+                    {"cloud_idx": int(i), "view": all_provenance[i][0],
+                     "mask_idx": all_provenance[i][1], "n_points": len(all_clouds[i])}
+                    for i in idx
+                ],
+                "n_points_pre_dbscan": len(raw),
+                "n_points_post_dbscan": len(clean),
+            })
+
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        with open(debug_dir / "cluster_assignment.json", "w") as f:
+            json.dump({"clusters": cluster_debug_records}, f, indent=2)
+        print(f"[Backproject] Debug cluster assignment → {debug_dir / 'cluster_assignment.json'}")
+
     # ── Co-axial rod fragment merge ───────────────────────────────────────
     if _cfg.MAX_ROD_GAP_M > 0:
         merged, visual_cls_per_cluster = _coaxial_merge(
@@ -465,7 +593,11 @@ def compute_proposals(dust3r_result: dict,
             angle_deg=_cfg.COAXIAL_ANGLE_DEG,
             max_offset_m=_cfg.COAXIAL_MAX_OFFSET_M,
             min_elong=_cfg.COAXIAL_MIN_ELONG,
+            debug_dir=debug_dir,
         )
+
+    if debug_dir is not None:
+        _save_debug_ply(merged, debug_dir / "clusters_final.ply")
 
     print(f"[Backproject] Results after DBSCAN cleanup + co-axial merge:")
     for i, (pts, vcls) in enumerate(zip(merged, visual_cls_per_cluster)):

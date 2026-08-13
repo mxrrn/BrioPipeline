@@ -169,7 +169,7 @@ def _load_classifier(device: str) -> ComponentClassifier | None:
 
 def process_sample(sample_id: int, fixed_half: int, device: str,
                    run_dir: Path, classifier: ComponentClassifier | None = None,
-                   sam_mode: str = "prompted") -> dict:
+                   sam_mode: str = "prompted", debug: bool = False) -> dict:
     print(f"\n{'='*60}")
     print(f" Sample {sample_id}")
     print(f"{'='*60}")
@@ -185,11 +185,13 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
     count_str = ", ".join(f"{k}: {v}" for k, v in sorted(folder_counts.items()))
     print(f"[Images] {len(raw_img_paths)} images ({count_str})")
 
-    out_dir  = run_dir / f"sample_{sample_id}"
-    crop_dir = out_dir / "cropped"
+    out_dir   = run_dir / f"sample_{sample_id}"
+    crop_dir  = out_dir / "cropped"
+    debug_dir = out_dir / "debug" if debug else None
 
     # ── Fixed-scale crop ─────────────────────────────────────────────────
-    img_paths = crop_images(raw_img_paths, crop_dir, fixed_half=fixed_half)
+    img_paths = crop_images(raw_img_paths, crop_dir, fixed_half=fixed_half,
+                            debug_dir=(debug_dir / "preprocess") if debug_dir else None)
 
     # Save ordered image list so the visualizer uses the same sequence as
     # SAM and DUSt3R (which index into img_paths by position)
@@ -222,6 +224,7 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
         image_paths=img_paths,
         classifier=classifier,
         conf_thresh=cfg.CLASSIFIER_CONF_THRESH,
+        debug_dir=(debug_dir / "backproject") if debug_dir else None,
     )
 
     # ── Classification ───────────────────────────────────────────────────
@@ -288,6 +291,11 @@ def main():
     parser.add_argument("--resume",  default=None,
                         help="Resume an existing run dir (e.g. run_015_20260605_1450). "
                              "Reuses cached DUSt3R/SAM outputs and skips completed samples.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Dump per-stage debug artifacts to sample_N/debug/: "
+                             "LCC crop overlays (preprocess/), and overlap graph, "
+                             "cluster assignment, coaxial merges + coloured .ply "
+                             "clouds (backproject/). Bypasses the proposals cache.")
     args = parser.parse_args()
     label = "samples_" + "_".join(str(s) for s in args.samples)
     setup_logging(label)
@@ -314,7 +322,7 @@ def main():
     for sid, raw_paths in zip(args.samples, all_raw):
         process_sample(sid, fixed_half=fixed_half, device=args.device,
                        run_dir=run_dir, classifier=classifier,
-                       sam_mode=args.sam_mode)
+                       sam_mode=args.sam_mode, debug=args.debug)
 
     print(f"\nAll samples processed → {run_dir}")
 

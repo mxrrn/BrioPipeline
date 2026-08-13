@@ -93,6 +93,43 @@ def _crop_image_fixed(img: np.ndarray, cx: float, cy: float,
     return out
 
 
+# ── Debug ─────────────────────────────────────────────────────────────────────
+
+def _draw_lcc_overlay(img: np.ndarray, info: dict | None) -> np.ndarray:
+    """Draw the detected LCC bbox + centroid on the original (uncropped) image,
+    so a bad crop (wrong blob picked as foreground, e.g. a shadow/reflection)
+    is diagnosable from the overlay alone, not just visible as a bad crop."""
+    overlay = img.copy()
+    if info is None:
+        cv2.putText(overlay, "NO FOREGROUND FOUND", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        return overlay
+    cx, cy, hw, hh = info["cx"], info["cy"], info["half_w"], info["half_h"]
+    x0, y0 = int(cx - hw), int(cy - hh)
+    x1, y1 = int(cx + hw), int(cy + hh)
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 255), 3)
+    cv2.drawMarker(overlay, (int(cx), int(cy)), (0, 255, 0),
+                    markerType=cv2.MARKER_CROSS, markerSize=24, thickness=2)
+    return overlay
+
+
+def save_lcc_debug(image_paths: list[Path], debug_dir: Path) -> None:
+    """
+    Save one LCC-overlay image per input view to `debug_dir`, independent of
+    the crop cache — always regenerated when requested so `--debug` runs stay
+    truthful even when reusing cached crops.
+    """
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    for p in image_paths:
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        info = _lcc_info(img)
+        overlay = _draw_lcc_overlay(img, info)
+        cv2.imwrite(str(debug_dir / f"{p.parent.name}_{p.name}"), overlay)
+    print(f"[Crop] LCC debug overlays → {debug_dir}")
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def compute_global_halfsize(all_sample_image_paths: list[list[Path]],
@@ -116,7 +153,7 @@ def compute_global_halfsize(all_sample_image_paths: list[list[Path]],
 
 
 def crop_images(image_paths: list[Path], output_dir: Path,
-                fixed_half: int) -> list[Path]:
+                fixed_half: int, debug_dir: Path | None = None) -> list[Path]:
     """
     Crop all images to a fixed square of side 2*fixed_half centred on each
     image's own LCC centroid, then downscale to half resolution.  Cached.
@@ -128,9 +165,15 @@ def crop_images(image_paths: list[Path], output_dir: Path,
         image_paths : original image paths
         output_dir  : where cropped images are saved
         fixed_half  : half-side from compute_global_halfsize()
+        debug_dir   : if given, save an LCC-overlay per view here (bypasses
+                      the crop cache — always regenerated so it stays truthful
+                      even when reusing cached crops from a resumed run)
 
     Returns list of cropped image paths (same order as input).
     """
+    if debug_dir is not None:
+        save_lcc_debug(image_paths, debug_dir)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     # marker name encodes both the crop size and the half-res flag so that
     # switching from an old full-res cache forces a clean regeneration
