@@ -99,6 +99,8 @@ def build_color_prototypes(component_images_dir: Path,
 
 
 if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from config import DATA_ROOT, OUTPUTS_ROOT
     protos = build_color_prototypes(
         DATA_ROOT / "component_images",

@@ -360,7 +360,7 @@ def compute_proposals(dust3r_result: dict,
           f"colour={'yes' if use_colour else 'no'}  visual={'yes' if use_visual else 'no'}  "
           f"conf_filter={'>=%.1f' % conf_thresh if confs_all is not None else 'off'}")
 
-    from component_classifier import crop_from_mask
+    from classification.component_classifier import crop_from_mask
 
     all_clouds    : list[np.ndarray]  = []
     all_centroids : list[np.ndarray]  = []   # 3D centroid (3,)

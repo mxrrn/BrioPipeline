@@ -24,3 +24,6 @@ brio_pipeline/CHANGELOG.md
 # Untracked pipeline directories
 brio_pipeline/brio_fast_pipeline/
 brio_pipeline/brio_annotator/
+
+# Classifier training-data builder cache (regenerable, multi-GB)
+brio_pipeline/brio_3d_pipeline/classification/training/preproc/

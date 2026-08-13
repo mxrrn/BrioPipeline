@@ -109,7 +109,7 @@ def _load_colour_prototypes() -> dict[str, np.ndarray]:
     from config import DATA_ROOT, OUTPUTS_ROOT
     cache_path = OUTPUTS_ROOT / "color_prototypes.pkl"
 
-    from component_map import build_color_prototypes
+    from classification.component_map import build_color_prototypes
     _COLOUR_CACHE = build_color_prototypes(
         DATA_ROOT / "component_images",
         cache_path=cache_path,

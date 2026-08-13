@@ -98,6 +98,7 @@ def run_dust3r(image_paths: list[Path], output_dir: Path, device: str = "cuda",
 
 if __name__ == "__main__":
     import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from config import MULTI_VIEW, IMAGE_ELEVATION, DEVICE, DUST3R_SIZE, DUST3R_NITER
     from pathlib import Path
 

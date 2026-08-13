@@ -27,12 +27,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config as cfg
 from logger        import setup_logging
 from puml_parser   import find_puml, parse_puml
-from preprocessor  import compute_global_halfsize, crop_images
-from dust3r_runner import run_dust3r
-from sam_runner    import run_sam_on_images
-from backprojector          import compute_proposals
-from classifier             import assign_classes
-from component_classifier   import ComponentClassifier
+from detection.preprocessor  import compute_global_halfsize, crop_images
+from detection.dust3r_runner import run_dust3r
+from detection.sam_runner    import run_sam_on_images
+from detection.backprojector          import compute_proposals
+from classification.classifier             import assign_classes
+from classification.component_classifier   import ComponentClassifier
 
 
 # ── Run directory ────────────────────────────────────────────────────────────
@@ -211,7 +211,8 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
         stability_thresh=cfg.SAM_STABILITY, min_area=cfg.SAM_MIN_AREA,
         max_area_frac=cfg.SAM_MAX_AREA_FRAC, fg_overlap_min=cfg.SAM_FG_OVERLAP_MIN,
         dedup_iou=cfg.SAM_DEDUP_IOU, keep_factor=cfg.SAM_KEEP_FACTOR,
-        mode=sam_mode,
+        mode=sam_mode, grid_spacing=cfg.SAM_GRID_SPACING,
+        dt_seeds=cfg.SAM_DT_SEEDS,
     )
 
     # ── Back-projection + clustering ─────────────────────────────────────
@@ -243,10 +244,21 @@ def process_sample(sample_id: int, fixed_half: int, device: str,
               f"({c[0]:+.3f},{c[1]:+.3f},{c[2]:+.3f})  "
               f"({b[0]:.3f},{b[1]:.3f},{b[2]:.3f})")
 
+    # A zero-point instance means a manifest component ended up with an
+    # empty cluster — it exists in the output but is represented nowhere.
+    # Surface it loudly instead of leaving it discoverable only by reading
+    # the JSON by hand (that's how the stwo3_1/nu_2 regression went
+    # unnoticed across several runs).
+    warnings = [f"{r.instance_id}: 0 points — not represented in any view"
+                for r in results if r.n_points == 0]
+    for w in warnings:
+        print(f"[WARN] Sample {sample_id}: {w}")
+
     summary = {
         "sample_id":    sample_id,
         "n_components": manifest.n_components,
         "crop_half":    fixed_half,
+        "warnings":     warnings,
         "instances": [
             {"instance_id": r.instance_id, "cls": r.cls,
              "n_points": r.n_points,

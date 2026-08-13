@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Train the MobileNetV3-small component visual classifier.
-# Weights are saved to brio_3d_pipeline/component_classifier.pth
+# Weights are saved to brio_3d_pipeline/classification/component_classifier.pth
 # and picked up automatically by the pipeline on the next run.
 #
 # Usage:
@@ -11,7 +11,7 @@ set -e
 cd "$(dirname "$0")"
 
 conda run -n brio-3d --no-capture-output \
-    python brio_3d_pipeline/component_classifier.py \
+    python brio_3d_pipeline/classification/component_classifier.py \
         --train \
         "$@" \
     2>&1 | tee brio_3d_pipeline/logs/train_classifier.log

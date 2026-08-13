@@ -159,7 +159,7 @@ class SampleManifest:
 
 ---
 
-### `preprocessor.py` — Fixed-scale crop
+### `detection/preprocessor.py` — Fixed-scale crop
 
 **Input**: raw multi-view JPEGs  
 **Output**: square half-resolution crops, consistent across all samples
@@ -193,9 +193,17 @@ The output is `fixed_half × fixed_half` pixels (half-resolution saves VRAM duri
 
 **Failure mode — BG_THRESHOLD on near-white pieces**: BRIO blocks (`blwo11`) and some rods are nearly white. After crop-and-pad, these pieces can merge visually with the white margin. If the LCC centroid is pulled toward the coloured pieces, the near-white piece may be partially outside the crop window, silently cutting off part of the construction.
 
+**TODO 19.06.2026**:
+- minimize distance between points in sam
+- ensure at least 1 point on each component
+- annotate image before reconstruction 
+    - apply geometric orientation assesment (geometric orientation in images only) -- occlusion handling with bbox
+    - if does not work: ...
+- prompted sam: try roboflow https://roboflow.com/ -- click on one component and sam masks that component -- point based SAM
+
 ---
 
-### `dust3r_runner.py` — Dense 3D reconstruction
+### `detection/dust3r_runner.py` — Dense 3D reconstruction
 
 **Input**: list of cropped image paths  
 **Output**: `dict` with `pts3d`, `confs`, `poses`, `intrinsics`, `depths`
@@ -240,7 +248,7 @@ This is critical on the 8 GB RTX 2070 Super — without it, SAM competes for the
      
 ---
 
-### `sam_runner.py` — 2D instance mask generation
+### `detection/sam_runner.py` — 2D instance mask generation
 
 **Input**: cropped image paths, `n_components`  
 **Output**: `list[list[dict]]` — one inner list per image, each dict has `segmentation (H×W bool)`, `area`, `predicted_iou`, `image_idx`
@@ -340,7 +348,7 @@ for m in final:
 
 ---
 
-### `backprojector.py` — 3D point clouds and instance grouping
+### `detection/backprojector.py` — 3D point clouds and instance grouping
 
 **Input**: `dust3r_result`, `sam_masks_per_image`, `n_components`  
 **Output**: `(merged, visual_cls, cluster_colours, cluster_elongations)` — four parallel lists of length N
@@ -449,7 +457,7 @@ This value is passed to `assign_classes` as `cluster_elongations` and used as th
 
 ---
 
-### `component_map.py` — Class-to-folder mapping and colour prototypes
+### `classification/component_map.py` — Class-to-folder mapping and colour prototypes
 
 **Purpose**: Maps between filesystem folder names and PUML class codes, and builds mean-HSV colour prototypes for each class from isolated component reference images.
 
@@ -480,7 +488,7 @@ Only `Images45` reference views are used. The prototype is the mean of mean-HSVs
 
 ---
 
-### `classifier.py` — Hungarian cost-matrix assignment
+### `classification/classifier.py` — Hungarian cost-matrix assignment
 
 **Input**: N point clouds, N manifest components, optional cluster colours and elongations  
 **Output**: `list[InstanceResult]` — one per proposal, with `instance_id`, `cls`, `n_points`, `centroid`, `bbox_size`
@@ -563,7 +571,7 @@ Because `rel_obs` ranks the plate first and `rel_nom` ranks blwo11 first, the co
 
 ---
 
-### `component_classifier.py` — MobileNetV3 visual classifier
+### `classification/component_classifier.py` — MobileNetV3 visual classifier
 
 **Purpose**: Classify isolated component crops to class codes. When loaded, its predictions are used as a strong visual vote in `assign_classes`.
 

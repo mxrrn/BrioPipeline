@@ -2,7 +2,7 @@
 MobileNetV3-small visual classifier trained on isolated component images.
 
 Train:
-    python component_classifier.py --train
+    python classification/component_classifier.py --train
     (or use train_classifier.sh)
 
 Inference:
@@ -13,7 +13,9 @@ import numpy as np
 import cv2
 from pathlib import Path
 # ── Folder name → PUML class code (single source of truth in component_map) ──
-from component_map import FOLDER_TO_CLASS as FOLDER_TO_CODE
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from classification.component_map import FOLDER_TO_CLASS as FOLDER_TO_CODE
 
 CLASSES = sorted(set(FOLDER_TO_CODE.values()))
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
@@ -284,7 +286,6 @@ class ComponentClassifier:
 
 if __name__ == "__main__":
     import argparse, sys
-    sys.path.insert(0, str(Path(__file__).parent))
     from config import COMPONENT_DATASET, CLASSIFIER_WEIGHTS, DEVICE
 
     parser = argparse.ArgumentParser()
