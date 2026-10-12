@@ -1,6 +1,6 @@
 # From Multi-View 2D to 3D Object Detection and Structure Generation in PlantUML
 
-**Bachelor's Thesis:** From Multi-View Images to Instance Diagrams: A Multi-View Detection Pipeline for Structural Relationship Inference in Small Assemblies
+A multi-view detection pipeline for structural relationship inference in small assemblies: from multi-view images to instance diagrams.
 
 ---
 
@@ -71,55 +71,39 @@ Construction
 ```
 00-project/
 ├── README.md                    ← this file
-├── CHANGELOG.md
 ├── .gitignore
 │
 └── brio_pipeline/               ← all code + launcher scripts
     ├── slow.sh                  ← annotate samples with the slow pipeline
     ├── train_classifier.sh      ← train the component visual classifier (once)
     ├── visualize.sh             ← 3D/2D visualisation
-    ├── labels.sh                ← export YOLO labels from slow outputs
-    ├── calibrate.sh             ← build fixed camera rig calibration (once)
-    ├── train.sh                 ← train YOLOv8n
-    ├── infer.sh                 ← fast inference on a sample
+    ├── labels.sh, calibrate.sh, train.sh, infer.sh   ← fast-pipeline launchers (kept for reference)
     │
     ├── brio_3d_pipeline/        ← slow annotation pipeline (main system)
     │   ├── README.md            ← full technical documentation (start here)
     │   ├── pipeline.py          ← entry point
     │   ├── config.py            ← all paths and hyperparameters
     │   ├── puml_parser.py       ← reads ground-truth component manifest
-    │   ├── preprocessor.py      ← fixed-scale crop around the construction
-    │   ├── dust3r_runner.py     ← dense 3D reconstruction (DUSt3R ViT-L)
-    │   ├── sam_runner.py        ← 2D instance masks (SAM ViT-B)
-    │   ├── backprojector.py     ← 3D point clouds + voxel-overlap clustering
-    │   ├── classifier.py        ← Hungarian assignment to PUML components
-    │   ├── component_classifier.py   ← MobileNetV3 visual classifier
-    │   ├── component_map.py     ← folder→class mapping + HSV prototypes
     │   ├── logger.py            ← auto timestamped logging
-    │   ├── visualize_2d.py      ← 2D mask overlay per component
-    │   ├── visualize.py         ← 3D point cloud export (PLY + PNG)
+    │   ├── visualize*.py        ← 2D/3D result and SAM debug visualisation
+    │   ├── crop_for_annotation.py
+    │   ├── detection/           ← localise instances in 3D (no class labels)
+    │   │   ├── preprocessor.py      ← fixed-scale crop around the construction
+    │   │   ├── dust3r_runner.py     ← dense 3D reconstruction (DUSt3R ViT-L)
+    │   │   ├── sam_runner.py        ← 2D instance masks (SAM ViT-B)
+    │   │   └── backprojector.py     ← 3D point clouds + voxel-overlap clustering
+    │   ├── classification/      ← assign class labels to instances
+    │   │   ├── classifier.py            ← Hungarian assignment to PUML components
+    │   │   ├── component_classifier.py  ← MobileNetV3 visual classifier (+ .pth weights)
+    │   │   ├── component_map.py         ← folder→class mapping + HSV prototypes
+    │   │   └── training/                ← classifier dataset builder
     │   ├── logs/                ← one .log per run (auto-created)
-    │   └── outputs/
-    │       └── run_NNN_YYYYMMDD_HHMM/
-    │           └── sample_N/
-    │               ├── image_order.json
-    │               ├── cropped/          ← fixed-scale crops
-    │               ├── dust3r/           ← pts3d cache
-    │               ├── sam/              ← mask cache
-    │               ├── proposals/        ← 3D cluster cache
-    │               ├── results.json      ← final assignment
-    │               ├── viz_2d.png
-    │               └── viz_3d.ply
+    │   └── outputs/             ← run_NNN_YYYYMMDD_HHMM/sample_N/ (git-ignored)
     │
-    └── brio_fast_pipeline/      ← [WORK IN PROGRESS — not yet available]
-        ...                        fast inference pipeline (YOLOv8 + triangulation)
-        └── outputs/
-            └── sample_N/
-                ├── predicted.puml
-                └── results.json
+    └── evaluation/              ← failure analyses
 ```
 
-> **Note:** `outputs/` (DUSt3R/SAM caches, ~37 MB per sample) and `component_classifier.pth` are excluded from git via `.gitignore`.
+> **Note:** `outputs/` (DUSt3R/SAM caches, ~37 MB per sample), classifier training crops and `__pycache__` are excluded from git via `.gitignore`. The trained `component_classifier.pth` is committed.
 
 ---
 
@@ -138,7 +122,7 @@ cd /mnt/c/BA/00-project/brio_pipeline
 ./train_classifier.sh
 ```
 
-Trains MobileNetV3-small on isolated component images (~40 epochs, ~10 min GPU). Saves weights to `brio_3d_pipeline/component_classifier.pth`. Run once; retrain only if the component dataset changes.
+Trains MobileNetV3-small on isolated component images (~40 epochs, ~10 min GPU). Saves weights to `brio_3d_pipeline/classification/component_classifier.pth`. Run once; retrain only if the component dataset changes.
 
 ### Phase 1 — Annotate samples (slow pipeline)
 
@@ -158,9 +142,9 @@ python visualize_2d.py --sample 113
 python visualize.py --sample 113
 ```
 
-### Phases 2–5 — Fast pipeline (work in progress)
+### Fast pipeline (not included)
 
-> **The fast pipeline (`brio_fast_pipeline/`) is not yet available.** Phases 2–5 (YOLO label export, camera rig calibration, YOLOv8 training, fast inference) are planned but not implemented. Only the slow pipeline (Phase 0 + Phase 1) is currently functional.
+> `brio_fast_pipeline/` is **not part of this repository**: work on it stopped before completion. It was a planned YOLOv8n + fixed-rig triangulation pipeline that would have been trained on the slow pipeline's labels. The `labels.sh`, `calibrate.sh`, `train.sh` and `infer.sh` launchers are kept for reference and exit with a message if the directory is absent.
 
 ### Launcher scripts reference
 
@@ -169,10 +153,10 @@ python visualize.py --sample 113
 | `slow.sh` | `<ids...> [--device cpu]` | Slow pipeline: annotate samples | available |
 | `train_classifier.sh` | `[--epochs N] [--batch N]` | Train MobileNetV3 visual classifier | available |
 | `visualize.sh` | `<id> [<run_name>]` | 3D/2D plots for one sample | available |
-| `labels.sh` | `[<ids...>]` | Export YOLO labels | work in progress |
-| `calibrate.sh` | `<ids...>` | Build fixed camera rig | work in progress |
-| `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n | work in progress |
-| `infer.sh` | `<id> [--puml <path>]` | Fast inference on one sample | work in progress |
+| `labels.sh` | `[<ids...>]` | Export YOLO labels | unavailable (fast pipeline not included) |
+| `calibrate.sh` | `<ids...>` | Build fixed camera rig | unavailable (fast pipeline not included) |
+| `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n | unavailable (fast pipeline not included) |
+| `infer.sh` | `<id> [--puml <path>]` | Fast inference on one sample | unavailable (fast pipeline not included) |
 
 Logs are written automatically on every run — no manual redirection needed. Each script writes a timestamped `.log` file to the relevant `logs/` folder. To follow live:
 
@@ -200,9 +184,9 @@ outputs/run_NNN/sample_N/results.json
 Full technical documentation (every file, every function, known failure modes):  
 **[brio_pipeline/brio_3d_pipeline/README.md](brio_pipeline/brio_3d_pipeline/README.md)**
 
-### Fast pipeline (`brio_fast_pipeline/`) — work in progress
+### Fast pipeline (`brio_fast_pipeline/`) — not included
 
-Planned: YOLOv8n detection trained on slow pipeline labels + fixed camera rig triangulation for sub-second inference. Not yet implemented.
+`brio_fast_pipeline/` is **not part of this repository**: work on it stopped before completion. It was a planned YOLOv8n + fixed-rig triangulation pipeline that would have been trained on the slow pipeline's labels. The `labels.sh`, `calibrate.sh`, `train.sh` and `infer.sh` launchers are kept for reference and exit with a message if the directory is absent.
 
 ---
 
@@ -239,8 +223,6 @@ pip install git+https://github.com/facebookresearch/segment-anything.git
 pip install roma einops trimesh scipy tqdm huggingface-hub \
             opencv-python scikit-learn matplotlib pillow
 
-# Fast pipeline
-pip install ultralytics
 ```
 
 ### Verify GPU
@@ -300,6 +282,5 @@ DUSt3R and SAM never run simultaneously — GPU memory is freed between stages (
 
 1. Wang et al. (2024) — *DUSt3R: Geometric 3D Vision Made Easy*
 2. Kirillov et al. (2023) — *Segment Anything*
-3. Jocher et al. (2023) — *Ultralytics YOLOv8*
-4. Liu et al. (2022) — *PETR: Position Embedding Transformation for Multi-View 3D Object Detection*
-5. Howard et al. (2019) — *Searching for MobileNetV3*
+3. Liu et al. (2022) — *PETR: Position Embedding Transformation for Multi-View 3D Object Detection*
+4. Howard et al. (2019) — *Searching for MobileNetV3*

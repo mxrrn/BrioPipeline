@@ -10,8 +10,7 @@
 set -e
 cd "$(dirname "$0")"
 
-conda run -n brio-3d --no-capture-output \
-    python brio_3d_pipeline/classification/component_classifier.py \
+"${PYTHON:-/home/mxrn/miniconda3/envs/brio-3d/bin/python}" -u brio_3d_pipeline/classification/component_classifier.py \
         --train \
         "$@" \
     2>&1 | tee brio_3d_pipeline/logs/train_classifier.log
