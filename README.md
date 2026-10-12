@@ -181,6 +181,8 @@ tail -f brio_3d_pipeline/logs/20260618_222000_samples_113.log
 outputs/run_NNN/sample_N/results.json
 ```
 
+The pipeline has two manifest modes: **enforce** (in `main`: the PUML component count drives SAM, clustering and assignment) and **free** (experimental, on the branch `brio3d-improvement/free-n-mode`: no manifest dependency, complete through back-projection/clustering).
+
 Full technical documentation (every file, every function, known failure modes):  
 **[brio_pipeline/brio_3d_pipeline/README.md](brio_pipeline/brio_3d_pipeline/README.md)**
 

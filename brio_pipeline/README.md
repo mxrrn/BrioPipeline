@@ -31,7 +31,7 @@ Trains MobileNetV3-small on the isolated component dataset (~40 epochs, ~10 min 
 ```bash
 ./slow.sh 113 114 115 116 117
 ```
-Runs CLAHE → DUSt3R → SAM → clustering → visual classification on the listed samples. Each run creates a new timestamped folder `outputs/run_NNN_YYYYMMDD_HHMM/`. Logs to `brio_3d_pipeline/logs/`.
+Runs CLAHE → DUSt3R → SAM → clustering → visual classification on the listed samples. Extra flags are forwarded to `pipeline.py` (`--sam-mode auto`, `--resume RUN`, `--debug`, `--device cpu`); see `brio_3d_pipeline/README.md` for the full list. The pipeline has two manifest modes: *enforce* (in `main`; the PUML manifest's component count drives the SAM budget, clustering and assignment) and *free* (experimental, on the branch `brio3d-improvement/free-n-mode` via `--mode free`; no dependency on the manifest, currently complete through back-projection/clustering only). See `brio_3d_pipeline/README.md`, section "Manifest modes". Each run creates a new timestamped folder `outputs/run_NNN_YYYYMMDD_HHMM/`. Logs to `brio_3d_pipeline/logs/`.
 
 ### Fast pipeline (not included)
 `brio_fast_pipeline/` is **not part of this repository**: work on it stopped before completion. It was a planned YOLOv8n + fixed-rig triangulation pipeline that would have been trained on the slow pipeline's labels. The `labels.sh`, `calibrate.sh`, `train.sh` and `infer.sh` launchers are kept for reference and exit with a message if the directory is absent.
@@ -51,7 +51,7 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 
 | Script | Arguments | What it does |
 |--------|-----------|--------------|
-| `slow.sh` | `<sample_ids...> [--device cpu]` | Slow pipeline: annotate samples |
+| `slow.sh` | `<sample_ids...> [--device cpu] [--sam-mode auto] [--resume RUN] [--debug]` | Slow pipeline: annotate samples |
 | `train_classifier.sh` | `[--epochs N] [--batch N] [--lr F]` | Train the component visual classifier |
 | `visualize.sh` | `<sample_id> [<run_name>]` | Plot 3D/2D instance clouds for one sample |
 | `labels.sh`, `calibrate.sh`, `train.sh`, `infer.sh` | — | Fast-pipeline launchers; exit with a message because `brio_fast_pipeline/` is not included |

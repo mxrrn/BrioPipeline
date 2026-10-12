@@ -26,6 +26,9 @@ python pipeline.py --samples 113 --resume run_021_20260616_2339
 # SAM auto mode (uniform grid, slower, less precise)
 python pipeline.py --samples 113 --sam-mode auto
 
+# Per-stage debug dump (see "Debug mode" below); bypasses the proposals cache
+python pipeline.py --samples 113 --debug
+
 # 2D verification overlay
 python visualize_2d.py --sample 113
 python visualize_2d.py --sample 113 --run run_021_20260616_2339
@@ -34,8 +37,53 @@ python visualize_2d.py --sample 113 --run run_021_20260616_2339
 python visualize.py --sample 113
 ```
 
+The shell launcher `../slow.sh 113 [flags]` forwards the same flags to `pipeline.py`.
+
 Outputs land in `outputs/run_NNN_YYYYMMDD_HHMM/sample_NNN/`.  
 Every slow stage (DUSt3R, SAM, proposals) is cached to disk and skipped on re-runs.
+
+### Command-line flags (`pipeline.py`)
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--samples ID [ID ...]` | `113` | Sample IDs to process |
+| `--device` | `config.DEVICE` | `cuda` or `cpu` |
+| `--sam-mode {prompted,auto}` | `prompted` | `prompted`: tight crop + foreground-only grid + edge-aware seeds. `auto`: SAM's own uniform grid |
+| `--resume RUN_DIR` | — | Re-use an existing run folder (cached DUSt3R/SAM outputs, completed samples skipped) |
+| `--debug` | off | Write per-stage debug artifacts to `sample_N/debug/` (see below) |
+
+### Manifest modes: enforce and free
+
+The pipeline has two manifest modes. Only **enforce** is in `main`; **free** is developed on the separate branch **`brio3d-improvement/free-n-mode`** (`git checkout brio3d-improvement/free-n-mode`), where it is selected with `--mode free`. `main` has no `--mode` flag and always behaves as enforce.
+
+| | `enforce` (`main`, default) | `free` (branch `brio3d-improvement/free-n-mode`) |
+|---|---|---|
+| Role of the PUML manifest | Drives the run: its component count **N** is an input | Not used by detection; only for scoring afterwards |
+| SAM masks kept per view | `N × SAM_KEEP_FACTOR` | Fixed cap (`SAM_FREE_MAX_MASKS_PER_VIEW`, 40), independent of N |
+| 3D clustering | Average-linkage agglomerative clustering forced to exactly N groups | Same clustering with a distance threshold (`FREE_CLUSTER_DIST_THRESHOLD`); the group count is data-dependent |
+| Classification | Hungarian assignment of N clouds to N components | Not implemented yet; planned to use a one-vs-all classifier with a reject option |
+| Output root | `outputs/` | `outputs_free/` |
+| Status | Stable; all results in this document | Experimental; complete through back-projection and clustering only |
+
+Enforce mode needs the ground-truth manifest to run, so it can annotate known constructions but cannot infer how many components an unseen construction has. Free mode exists to remove that dependency. Its usage, parameters and current limits are documented in the README on the free-n-mode branch.
+
+### Debug mode (`--debug`)
+
+Writes to `sample_N/debug/`:
+
+| Folder | Contents |
+|---|---|
+| `preprocess/` | LCC crop overlay per image |
+| `backproject/` | `overlap_graph.json`, `cluster_assignment.json`, `coaxial_merges.json`, `raw_by_mask.ply` (every mask cloud) and `clusters_final.ply` (merged clusters, coloured) |
+
+`--debug` bypasses the proposals cache so the clustering is recomputed and dumped.
+
+### Helper scripts
+
+| Script | Purpose |
+|---|---|
+| `crop_for_annotation.py --samples 1-50 --out DIR` | Write the same fixed-scale crops the pipeline would produce for a range of samples, without running DUSt3R/SAM (used to prepare images for hand annotation) |
+| `classification/training/scan_global_halfsize.py` | One-off scan that computes a single dataset-wide crop half-size, so classifier training data has one pixel scale across all samples |
 
 ---
 
@@ -88,15 +136,17 @@ Extend through-joint rod bboxes along the rod PCA axis
 Per-component: instance_id, n_points, centroid (3,), bbox_size (3,)
 ```
 
-**Current status by phase** (`brio3d-improvement/dev`, 2026-08-13):
+**Current status by phase** (`main`, 2026-10-12):
 
 | Phase | State |
 |---|---|
-| Preprocessing | Stable, unchanged for months |
-| 3D reconstruction (DUSt3R) | Stable, unchanged for months |
+| Preprocessing | Stable |
+| 3D reconstruction (DUSt3R) | Stable |
 | SAM | Actively improved this branch: fixed-spacing grid + edge-aware DT seeds, multi-granularity mask capture, banded coverage-greedy keep policy |
 | 3D backprojection | Working - flawed |
-| Classification | Working - flawed - colour/size/elongation cost |
+| Classification | Working - flawed - colour/size/elongation cost, plus MobileNetV3 visual vote |
+| Manifest mode | `enforce` stable (`main`); `free` experimental on branch `brio3d-improvement/free-n-mode` (back-projection/clustering only) |
+| Debugging | `--debug` per-stage dumps (preprocess, backprojection); SAM mask/point overlay tools |
 | Occlusion handling | Reduced to amodal through-joint rod bbox extension (`pipeline.py`).
 
 ---
@@ -778,6 +828,7 @@ A separate, standalone tool for building a real-domain training set for the comp
 ```bash
 python classification/training/dataset_builder.py 113
 python classification/training/batch_build.py --limit 40
+python classification/training/scan_global_halfsize.py   # dataset-wide crop half-size
 ```
 
 Not yet wired into `pipeline.py` — it produces a dataset, not a retrained `component_classifier.pth`.
@@ -872,6 +923,7 @@ outputs/
         │   └── sam_masks_top10_prompted_filt.pkl   # filtered masks per image
         ├── proposals/
         │   └── proposals_N5_v12.pkl   # 5 merged clusters + colours + elongations
+        ├── debug/                     # only with --debug (preprocess/, backproject/)
         ├── image_order.json           # ordered list of cropped image paths
         ├── results.json               # final per-component assignment
         ├── viz_2d.png                 # 2D mask overlay grid (from visualize_2d.py)
