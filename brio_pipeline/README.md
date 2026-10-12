@@ -1,15 +1,15 @@
 # BRIO Pipeline — Documentation
 
-This directory contains two pipelines and a set of launcher scripts:
+This directory contains the slow 3D annotation pipeline, the launcher scripts, and the launchers of a fast pipeline that is not included:
 
 | Pipeline | Purpose | Runtime |
 |---|---|---|
 | `brio_3d_pipeline/` | Slow annotation pipeline. Produces 3D ground-truth labels and training data. | ~35 min/sample (cold), ~2 min (cached) |
-| `brio_fast_pipeline/` | Fast inference. Trained YOLOv8 + fixed-rig triangulation. | < 2 seconds/sample |
+| `brio_fast_pipeline/` | **Not included.** Planned fast inference (YOLOv8 + fixed-rig triangulation); development stopped. | — |
 
-The slow pipeline runs once per sample to produce training labels. The fast pipeline trains on those labels and then runs on unseen samples.
+The slow pipeline runs once per sample and produces 3D labels. The fast pipeline was intended to train on those labels and then run on unseen samples. See below for its status.
 
-**Logs are written automatically** on every run — no manual redirection needed. Both pipelines write timestamped `.log` files to their own `logs/` folder.
+**Logs are written automatically** on every run — no manual redirection needed. Each run writes a timestamped `.log` file to `brio_3d_pipeline/logs/`.
 
 ---
 
@@ -31,49 +31,10 @@ Trains MobileNetV3-small on the isolated component dataset (~40 epochs, ~10 min 
 ```bash
 ./slow.sh 113 114 115 116 117
 ```
-Runs CLAHE → DUSt3R → SAM → clustering → visual classification on the listed samples. Each run creates a new timestamped folder `outputs/run_NNN_YYYYMMDD_HHMM/`. Logs to `brio_3d_pipeline/logs/`.
+Runs CLAHE → DUSt3R → SAM → clustering → visual classification on the listed samples. Extra flags are forwarded to `pipeline.py` (`--sam-mode auto`, `--resume RUN`, `--debug`, `--device cpu`); see `brio_3d_pipeline/README.md` for the full list. `--mode enforce` (default) uses the PUML manifest's component count to drive the SAM budget, clustering and assignment. `--mode free` removes that dependency and currently runs through back-projection/clustering only, writing to `outputs_free/`; see `brio_3d_pipeline/README.md`. Each run creates a new timestamped folder `outputs/run_NNN_YYYYMMDD_HHMM/`. Logs to `brio_3d_pipeline/logs/`.
 
-### Phase 2 — Export training labels
-```bash
-./labels.sh
-```
-Converts all completed slow-pipeline outputs into YOLO-format labels. Logs to `brio_fast_pipeline/logs/`.
-
-To export only specific samples:
-```bash
-./labels.sh 113 114 115
-```
-
-### Phase 3 — Calibrate camera rig (once)
-```bash
-./calibrate.sh 113
-```
-Builds the fixed camera rig model from one or more DUSt3R caches. Only needs to run once. Add more reference samples for a more stable calibration:
-```bash
-./calibrate.sh 113 114 115
-```
-
-### Phase 4 — Train YOLOv8
-```bash
-./train.sh
-```
-Trains YOLOv8n on the exported dataset. Requires at least ~20 annotated samples for meaningful results. Logs to `brio_fast_pipeline/logs/`.
-
-Optional overrides:
-```bash
-./train.sh --epochs 150 --batch 8
-```
-
-### Phase 5 — Run fast inference
-```bash
-./infer.sh 120
-```
-Runs the full fast pipeline on sample 120 and writes `predicted.puml` + `results.json` to `brio_fast_pipeline/outputs/sample_120/`. Logs to `brio_fast_pipeline/logs/`.
-
-With a ground-truth PUML (tells the model the expected per-class instance counts):
-```bash
-./infer.sh 120 --puml /mnt/c/BA/02-resources/data/constructions/Sample_120_InstanceDiagram/InstanceDiagramS120.puml
-```
+### Fast pipeline (not included)
+`brio_fast_pipeline/` is **not part of this repository**: work on it stopped before completion. It was a planned YOLOv8n + fixed-rig triangulation pipeline that would have been trained on the slow pipeline's labels. The `labels.sh`, `calibrate.sh`, `train.sh` and `infer.sh` launchers are kept for reference and exit with a message if the directory is absent.
 
 ### Visualise slow-pipeline results
 ```bash
@@ -90,13 +51,12 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 
 | Script | Arguments | What it does |
 |--------|-----------|--------------|
-| `slow.sh` | `<sample_ids...> [--device cpu]` | Slow pipeline: annotate samples |
+| `slow.sh` | `<sample_ids...> [--device cpu] [--sam-mode auto] [--resume RUN] [--debug] [--mode free]` | Slow pipeline: annotate samples |
 | `train_classifier.sh` | `[--epochs N] [--batch N] [--lr F]` | Train the component visual classifier |
 | `visualize.sh` | `<sample_id> [<run_name>]` | Plot 3D/2D instance clouds for one sample |
-| `labels.sh` | `[<sample_ids...>]` | Export YOLO labels from completed samples |
-| `calibrate.sh` | `<sample_ids...>` | Build fixed camera rig calibration |
-| `train.sh` | `[--epochs N] [--batch N]` | Train YOLOv8n on exported dataset |
-| `infer.sh` | `<sample_id> [--puml <path>]` | Fast inference on one sample |
+| `labels.sh`, `calibrate.sh`, `train.sh`, `infer.sh` | — | Fast-pipeline launchers; exit with a message because `brio_fast_pipeline/` is not included |
+
+All launchers use `/home/mxrn/miniconda3/envs/brio-3d/bin/python` by default; set `PYTHON=/path/to/python` to override.
 
 ---
 
@@ -105,17 +65,13 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
 ```
 00-project/
 │
-└── brio_pipeline/              # Both pipelines + launchers
+└── brio_pipeline/              # Slow pipeline + launchers
     ├── slow.sh
     ├── train_classifier.sh     # Train component visual classifier
     ├── visualize.sh
-    ├── labels.sh
-    ├── calibrate.sh
-    ├── train.sh
-    ├── infer.sh
+    ├── labels.sh / calibrate.sh / train.sh / infer.sh   # fast-pipeline launchers (reference only)
     ├── README.md               # This file
-    ├── CHANGELOG.md            # Change log (reverse chronological)
-    ├── 260520-brio-3d-pipeline-setup-guide.md
+    ├── evaluation/             # Failure analyses
     │
     ├── brio_3d_pipeline/       # Slow pipeline
     │   ├── pipeline.py         # Entry point (orchestrator)
@@ -137,7 +93,7 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
     │   │   ├── classifier.py       # Hungarian assignment (visual + colour)
     │   │   ├── component_classifier.py  # MobileNetV3-small classifier
     │   │   ├── component_map.py    # Folder→code mapping + HSV prototypes
-    │   │   ├── component_classifier.pth  # Trained weights (git-ignored)
+    │   │   ├── component_classifier.pth  # Trained weights (committed)
     │   │   └── training/           # One-vs-all dataset builder (Mapping.drawio → 3D → crops)
     │   │       ├── mapping_parser.py
     │   │       ├── dataset_builder.py
@@ -156,25 +112,6 @@ All scripts live in `brio_pipeline/` and change into the correct subdirectory au
     │               ├── results.json
     │               ├── viz_3d.png
     │               └── viz_2d.png
-    │
-    └── brio_fast_pipeline/     # Fast pipeline
-        ├── config.py
-        ├── logger.py
-        ├── label_exporter.py
-        ├── calibrator.py
-        ├── detector.py
-        ├── triangulator.py
-        ├── connector.py
-        ├── puml_generator.py
-        ├── train.py
-        ├── infer.py
-        ├── logs/
-        ├── calibration/rig_poses.pkl
-        ├── dataset/            # YOLO-format training data
-        └── outputs/
-            └── sample_N/
-                ├── predicted.puml
-                └── results.json
 ```
 
 ---
@@ -212,7 +149,7 @@ tail -f brio_3d_pipeline/logs/20260527_001200_samples_113_114.log
 8. [Configuration Reference](#8-configuration-reference)
 9. [Component Class Vocabulary](#9-component-class-vocabulary)
 10. [Environment Setup](#10-environment-setup)
-11. [Fast Pipeline — Option C](#11-fast-pipeline--option-c)
+11. [Fast Pipeline (not included)](#11-fast-pipeline-not-included)
 
 ---
 
@@ -535,6 +472,7 @@ Centroid coordinates are in DUSt3R's arbitrary world-space (not metres). Do not 
 | SAM top-N assumption | Assumes the N best SAM masks correspond to the N physical components | Fails if one component produces no confident mask |
 | Small component visual classification | Crops < 32 px skip classifier; confidence < 0.40 casts no vote | Fallback to colour prototype; generally correct for fasteners since they're often unique in the manifest |
 | Domain gap (classifier) | Trained on isolated white-background images; inference on scene crops | Mitigated by CLAHE and heavy augmentation; 93.3% val acc in practice |
+| Visual-classifier signal in assignment | Not currently contributing to instance-class assignment | Assignment falls back to colour/size/elongation cost only; under investigation |
 
 ---
 
@@ -577,10 +515,7 @@ rm -rf brio_3d_pipeline/outputs/run_NNN_YYYYMMDD_HHMM/sample_114/
 | `CLASSIFIER_WEIGHTS` | `classification/component_classifier.pth` | MobileNetV3-small checkpoint |
 | `CLASSIFIER_CONF_THRESH` | `0.40` | Minimum confidence to trust a visual prediction |
 
-`brio_fast_pipeline/config.py`:
-
-| Parameter | Default | Effect |
-|-----------|---------|--------|
+-----------|---------|--------|
 | `YOLO_BASE_MODEL` | `"yolov8n.pt"` | Pretrained COCO weights to fine-tune from |
 | `YOLO_EPOCHS` | `100` | Default training epochs |
 | `YOLO_BATCH` | `16` | Training batch size |
@@ -648,9 +583,6 @@ pip install git+https://github.com/facebookresearch/segment-anything.git
 # Core dependencies
 pip install opencv-python scikit-learn scipy matplotlib pillow
 
-# Fast pipeline (YOLO)
-pip install ultralytics
-
 # Verify CUDA
 python -c "import torch; print('CUDA:', torch.cuda.is_available())"
 ```
@@ -665,61 +597,15 @@ wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth \
 
 **Component classifier weights** are produced by running `./train_classifier.sh` once (~10 min).
 
-**Always use the direct Python binary** — not `conda run`. The launcher scripts do this automatically. If running Python directly:
+**Use the direct Python binary** rather than `conda run`. The launcher scripts do this automatically (override with `PYTHON=...`). If running Python directly:
 ```bash
 /home/mxrn/miniconda3/envs/brio-3d/bin/python
 ```
 
 ---
 
-## 11. Fast Pipeline — Option C
+## 11. Fast Pipeline (not included)
 
-The fast pipeline trains a YOLOv8 detector on the slow pipeline's YOLO labels and performs sub-second inference using a fixed camera rig calibration for 3D triangulation.
+`brio_fast_pipeline/` is **not part of this repository**: work on it stopped before completion. It was a planned YOLOv8n + fixed-rig triangulation pipeline that would have been trained on the slow pipeline's labels. The `labels.sh`, `calibrate.sh`, `train.sh` and `infer.sh` launchers are kept for reference and exit with a message if the directory is absent.
 
-### Architecture
-
-```
-Training time (runs once):
-  labels.sh     →  brio_fast_pipeline/dataset/   (YOLO format)
-  train.sh      →  brio_fast_pipeline/runs/detect/.../best.pt
-
-Calibration time (runs once):
-  calibrate.sh  →  brio_fast_pipeline/calibration/rig_poses.pkl
-
-Inference time (< 2 seconds per sample):
-  ~20 images
-    ↓  detector.py     — YOLOv8 detection (~700ms)
-    ↓  triangulator.py — DLT triangulation (~5ms)
-    ↓  connector.py    — proximity + slot rules (~1ms)
-    ↓  puml_generator.py (~1ms)
-  brio_fast_pipeline/outputs/sample_N/predicted.puml
-  brio_fast_pipeline/outputs/sample_N/results.json
-```
-
-### File reference
-
-| File | Role |
-|------|------|
-| `config.py` | All paths, class vocabulary, slot compatibility rules |
-| `logger.py` | Automatic timestamped logging |
-| `label_exporter.py` | Converts slow pipeline outputs → YOLO training labels |
-| `calibrator.py` | Builds fixed camera rig from DUSt3R caches |
-| `detector.py` | YOLOv8 inference wrapper |
-| `train.py` | YOLOv8n training entry point |
-| `triangulator.py` | DLT triangulation: YOLO 2D boxes × rig poses → 3D |
-| `connector.py` | 3D proximity + slot compatibility rules → connection edges |
-| `puml_generator.py` | Instance list + edges → PlantUML source |
-| `infer.py` | End-to-end fast inference entry point |
-
-### How occlusion is handled
-
-A component occluded in most views is triangulated from the views where it is visible. The DLT solver uses all views that detect the class and finds the least-squares best 3D position. Even two non-adjacent views give an accurate triangulation because the camera geometry is known precisely from the fixed rig.
-
-This is fundamentally stronger than monocular depth estimation (Option B): depth from a single image is ambiguous, especially for the flat-background BRIO setup.
-
-### Switching to Option B later
-
-Options B and C share the same YOLO detector — no re-training or re-labelling required to evaluate Option B. To try monocular depth lifting:
-1. `pip install depth-anything-v2`
-2. Create `triangulator_mono.py`
-3. Compare 3D accuracy against the slow pipeline's ground-truth centroids
+The intended design was: export the slow pipeline's results as YOLO labels, fine-tune YOLOv8n on them, and at inference time detect components in ~20 views and triangulate them with a fixed, pre-calibrated camera rig (DLT), then derive connections from 3D proximity and slot-compatibility rules and emit PlantUML.

@@ -26,6 +26,9 @@ python pipeline.py --samples 113 --resume run_021_20260616_2339
 # SAM auto mode (uniform grid, slower, less precise)
 python pipeline.py --samples 113 --sam-mode auto
 
+# Per-stage debug dump (see "Debug mode" below); bypasses the proposals cache
+python pipeline.py --samples 113 --debug
+
 # 2D verification overlay
 python visualize_2d.py --sample 113
 python visualize_2d.py --sample 113 --run run_021_20260616_2339
@@ -34,8 +37,73 @@ python visualize_2d.py --sample 113 --run run_021_20260616_2339
 python visualize.py --sample 113
 ```
 
+The shell launcher `../slow.sh 113 [flags]` forwards the same flags to `pipeline.py`.
+
 Outputs land in `outputs/run_NNN_YYYYMMDD_HHMM/sample_NNN/`.  
 Every slow stage (DUSt3R, SAM, proposals) is cached to disk and skipped on re-runs.
+
+### Command-line flags (`pipeline.py`)
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--samples ID [ID ...]` | `113` | Sample IDs to process |
+| `--device` | `config.DEVICE` | `cuda` or `cpu` |
+| `--sam-mode {prompted,auto}` | `prompted` | `prompted`: tight crop + foreground-only grid + edge-aware seeds. `auto`: SAM's own uniform grid |
+| `--resume RUN_DIR` | — | Re-use an existing run folder (cached DUSt3R/SAM outputs, completed samples skipped) |
+| `--mode {enforce,free}` | `enforce` | Manifest mode (see below) |
+| `--debug` | off | Add the opt-in preprocess overlays and bypass the proposals cache (see below) |
+
+### Manifest modes: `--mode enforce` vs `--mode free`
+
+The pipeline can run in two modes, selected with `--mode` (this branch, `brio3d-improvement/free-n-mode`):
+
+| | `enforce` (default) | `free` |
+|---|---|---|
+| Role of the PUML manifest | Drives the run: its component count **N** is an input | Not used by detection; only for scoring afterwards (when present) |
+| SAM masks kept per view | `N × SAM_KEEP_FACTOR` | Fixed cap `SAM_FREE_MAX_MASKS_PER_VIEW` (40), independent of N |
+| 3D clustering | Average-linkage agglomerative clustering with `n_clusters = N`; pads/fails if fewer than N clouds | Same clustering with `distance_threshold = FREE_CLUSTER_DIST_THRESHOLD` (0.7 ≈ merge only above ~0.3 average overlap); the number of groups is data-dependent |
+| Classification | Hungarian assignment of N clouds to N components | **Not implemented yet**: `assign_classes()` asserts `len(proposals) == len(manifest.components)` and raises in free mode |
+| Output root | `outputs/` | `outputs_free/` (separate `run_NNN` counter, never mixed with enforce runs) |
+| Proposals cache | `proposals_N{N}_v13.pkl` | `proposals_N{N}_v13_free.pkl` |
+
+```bash
+python pipeline.py --samples 113                 # enforce (default, unchanged behaviour)
+python pipeline.py --samples 113 --mode free     # free: complete through back-projection/clustering
+```
+
+**Current limits of free mode.** A free-mode run completes DUSt3R, SAM and back-projection/clustering and produces the always-on SAM overlays and cluster point clouds (below), then stops at classification. The cluster count is the quantity to inspect: tune `FREE_CLUSTER_DIST_THRESHOLD` and `SAM_FREE_MAX_MASKS_PER_VIEW` against `debug/backproject/` output. Reject-aware classification (Phase 4) is the planned next step and builds on the one-vs-all classifier described below.
+
+Free-mode parameters in `config.py`:
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `OUTPUTS_ROOT_FREE` | `outputs_free/` | Run history for `--mode free` |
+| `SAM_FREE_MAX_MASKS_PER_VIEW` | 40 | Per-view mask cap in free mode (replaces `N × SAM_KEEP_FACTOR`) |
+| `FREE_CLUSTER_DIST_THRESHOLD` | 0.7 | Clustering distance (= 1 − overlap) above which groups are not merged |
+
+### One-vs-all classifier (in development, not yet wired in)
+
+`classification/one_vs_all/` (`model.py`, `train.py`; plan in `ONE_VS_ALL_PLAN.md`) replaces the N-way softmax MobileNetV3 with a shared MobileNetV3-small backbone and 29 independent sigmoid heads, so a crop can be rejected by every head ("none of the above"), which free mode needs. It trains on real construction-domain crops from `classification/training/dataset_crops/` (cut from `Mapping.drawio` seed points, with background crops as negatives), with per-class `pos_weight`, class-balanced sampling and a sample-level train/val split. `pipeline.py` still loads the old classifier. `classification/training/diagnose_snap.py` is a diagnostic for seed-point snapping failures (extended search distance for `ti`, `whre`, `rolo`).
+
+### Debug mode (`--debug`)
+
+Writes to `sample_N/debug/`:
+
+| Folder | Contents |
+|---|---|
+| `preprocess/` | LCC crop overlay per image |
+| `backproject/` | `overlap_graph.json`, `cluster_assignment.json`, `coaxial_merges.json`, `raw_by_mask.ply` (every mask cloud) and `clusters_final.ply` (merged clusters, coloured) |
+
+`--debug` bypasses the proposals cache so the clustering is recomputed and dumped. In this branch `backproject/` also contains `clusters_final.png` (3-view matplotlib snapshot), and `preprocess/` stays opt-in behind `--debug`.
+
+**Always-on debug output (this branch, both modes).** Every run, without `--debug`, also writes `sam_masks_debug/masks_overlay_<sam_mode>.png`, `sam_points_debug/points_overlay_<sam_mode>.png` and `debug/backproject/` (they do not depend on classification succeeding), and, once `results.json` exists, `viz_2d.png` and `viz_3d.*` automatically.
+
+### Helper scripts
+
+| Script | Purpose |
+|---|---|
+| `crop_for_annotation.py --samples 1-50 --out DIR` | Write the same fixed-scale crops the pipeline would produce for a range of samples, without running DUSt3R/SAM (used to prepare images for hand annotation) |
+| `classification/training/scan_global_halfsize.py` | One-off scan that computes a single dataset-wide crop half-size, so classifier training data has one pixel scale across all samples |
 
 ---
 
@@ -49,32 +117,37 @@ Every slow stage (DUSt3R, SAM, proposals) is cached to disk and skipped on re-ru
 Read component manifest from InstanceDiagramS<N>.puml
   → class list, instance IDs, through-joint pairs
         │
-        ▼  preprocessor.py
+       ═══════════════════════  detection/  ═══════════════════════
+        ▼  detection/preprocessor.py
 Fixed-scale crop centred on the construction (largest-LCC + 20% padding)
   → half-resolution square crops, white margins, consistent across all samples
         │
-        ▼  dust3r_runner.py                        [GPU – cached]
+        ▼  detection/dust3r_runner.py                [GPU – cached]
 DUSt3R global alignment on all cropped images
   → pts3d (H×W×3) per view — world-space 3D coordinates for every pixel
   → confs (H×W) per view — per-pixel reconstruction confidence
         │
-        ▼  sam_runner.py                           [GPU – cached]
-SAM SamPredictor: tight-crop → black background → CLAHE → fg-grid prompts
+        ▼  detection/sam_runner.py                   [GPU – cached]
+SAM SamPredictor: tight-crop → black background → CLAHE → fg-grid + edge-aware
+DT-seed prompts (fixed 15px spacing, not derived from component count)
   → top-(N × keep_factor) masks per view, in fixed-scale image coordinates
         │
-        ▼  backprojector.py                        [CPU – cached]
+        ▼  detection/backprojector.py                [CPU – cached]
 For each SAM mask: index pts3d → 3D point cloud
+  (also calls classification/component_classifier.py per-mask for a visual
+   veto signal — the one dependency edge from detection/ into classification/)
 Voxel-overlap agglomerative clustering (avg-linkage, colour-repulsion)
   → N merged instance clouds
 DBSCAN noise removal per cloud
 Co-axial rod-fragment merge (occluded rod stubs)
 PCA elongation per cloud
         │
-        ▼  classifier.py
+       ═══════════════════════  classification/  ═══════════════════════
+        ▼  classification/classifier.py
 Hungarian optimal assignment of N clouds to N PUML components
   cost = colour_weight×HSV_dist + size_weight×|rel_obs−rel_nom|
        + elong_weight×|log(obs_elong)−log(nom_elong)|
-       + visual_mismatch_penalty (if MobileNetV3 is loaded)
+       + visual_mismatch_penalty (if MobileNetV3 is loaded — see Known limitation below)
         │
         ▼  pipeline.py (amodal extension)
 Extend through-joint rod bboxes along the rod PCA axis
@@ -82,6 +155,20 @@ Extend through-joint rod bboxes along the rod PCA axis
         ▼  results.json
 Per-component: instance_id, n_points, centroid (3,), bbox_size (3,)
 ```
+
+**Current status by phase** (`brio3d-improvement/free-n-mode`, 2026-10-12):
+
+| Phase | State |
+|---|---|
+| Preprocessing | Stable |
+| 3D reconstruction (DUSt3R) | Stable |
+| SAM | Actively improved this branch: fixed-spacing grid + edge-aware DT seeds, multi-granularity mask capture, banded coverage-greedy keep policy |
+| 3D backprojection | Working - flawed |
+| Classification | Working - flawed - colour/size/elongation cost, plus MobileNetV3 visual vote |
+| Manifest mode | `enforce` stable; `free` working through back-projection/clustering, classification pending (Phase 4) |
+| Debugging | Always-on SAM mask/point overlays and cluster dumps; `--debug` adds preprocess overlays; standalone SAM overlay tools |
+| One-vs-all classifier | Model and training script written; not yet used by `pipeline.py` |
+| Occlusion handling | Reduced to amodal through-joint rod bbox extension (`pipeline.py`).
 
 ---
 
@@ -732,6 +819,43 @@ Open `viz_3d.ply` in CloudCompare (Windows) or MeshLab for an interactive view o
 
 ---
 
+### `visualize_sam_masks.py` — SAM mask debug overlay
+
+Renders the kept SAM masks per view (post-filter, pre-3D-clustering), one colour per mask, reusing the SAM cache from a previous run — no model load, no GPU needed.
+
+```bash
+python visualize_sam_masks.py 113
+python visualize_sam_masks.py 113 --run run_021_20260616_2339
+```
+
+Useful for isolating whether a problem is in SAM's 2D segmentation or in the 3D clustering/classification stages downstream.
+
+---
+
+### `visualize_sam_points.py` — SAM prompt-point debug overlay
+
+Shows where SAM's prompt points (uniform grid + edge-aware DT seeds) land on each view, without running SAM or DUSt3R.
+
+```bash
+python visualize_sam_points.py 113
+```
+
+---
+
+### `classification/training/` — Training-data builder (in progress)
+
+A separate, standalone tool for building a real-domain training set for the component classifier: `mapping_parser.py` reads hand-annotated seed points from each sample's `Mapping.drawio`, `dataset_builder.py` lifts them to 3D and reprojects them into every view to cut labelled crops, and `batch_build.py` runs that across many samples. It has its own cache directory and does not depend on or modify anything under `detection/` or the rest of `classification/`.
+
+```bash
+python classification/training/dataset_builder.py 113
+python classification/training/batch_build.py --limit 40
+python classification/training/scan_global_halfsize.py   # dataset-wide crop half-size
+```
+
+Not yet wired into `pipeline.py` — it produces a dataset, not a retrained `component_classifier.pth`.
+
+---
+
 ## Data flow: concrete example (sample 113)
 
 Sample 113 contains: `blwo11_1`, `rome_1`, `plpl53_1`, `nu_1`, `scsm_1` (5 components).
@@ -819,15 +943,17 @@ outputs/
         ├── sam/
         │   └── sam_masks_top10_prompted_filt.pkl   # filtered masks per image
         ├── proposals/
-        │   └── proposals_N5_v12.pkl   # 5 merged clusters + colours + elongations
+        │   └── proposals_N5_v13.pkl   # 5 merged clusters + colours + elongations
+        ├── debug/                     # backproject/ always; preprocess/ only with --debug
+        ├── sam_masks_debug/, sam_points_debug/   # always-on SAM overlays
         ├── image_order.json           # ordered list of cropped image paths
         ├── results.json               # final per-component assignment
         ├── viz_2d.png                 # 2D mask overlay grid (from visualize_2d.py)
         └── viz_3d.ply                 # coloured 3D point cloud (from visualize.py)
 ```
 
-**Cache version suffix** in `proposals_N5_v12.pkl`:
-- `v12` = current version (elongation feature + seeded DBSCAN)
-- `_vis` suffix = run with visual classifier loaded (e.g. `proposals_N5_v12_vis.pkl`)
+**Cache version suffix** in `proposals_N5_v13.pkl`:
+- `v13` = current version (v12 plus the fix that re-enabled the visual-classifier vote and a seeded point subsample; free mode adds a `_free` suffix)
+- `_vis` suffix = run with visual classifier loaded (e.g. `proposals_N5_v13_vis.pkl`)
 
 Changing any grouping parameter (voxel div, overlap min, colour weight, co-axial thresholds) requires deleting the `proposals_N*.pkl` file to force regeneration.
