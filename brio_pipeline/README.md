@@ -535,6 +535,7 @@ Centroid coordinates are in DUSt3R's arbitrary world-space (not metres). Do not 
 | SAM top-N assumption | Assumes the N best SAM masks correspond to the N physical components | Fails if one component produces no confident mask |
 | Small component visual classification | Crops < 32 px skip classifier; confidence < 0.40 casts no vote | Fallback to colour prototype; generally correct for fasteners since they're often unique in the manifest |
 | Domain gap (classifier) | Trained on isolated white-background images; inference on scene crops | Mitigated by CLAHE and heavy augmentation; 93.3% val acc in practice |
+| Visual-classifier signal in assignment | Not currently contributing to instance-class assignment | Assignment falls back to colour/size/elongation cost only; under investigation |
 
 ---
 

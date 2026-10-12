@@ -23,7 +23,15 @@ brio_pipeline/CHANGELOG.md
 
 # Untracked pipeline directories
 brio_pipeline/brio_fast_pipeline/
-brio_pipeline/brio_annotator/
 
 # Classifier training-data builder cache (regenerable, multi-GB)
 brio_pipeline/brio_3d_pipeline/classification/training/preproc/
+
+# Run outputs, training data, logs (regenerable)
+brio_pipeline/brio_3d_pipeline/outputs/
+brio_pipeline/brio_3d_pipeline/outputs_free/
+brio_pipeline/brio_3d_pipeline/classification/training/dataset_crops/
+brio_pipeline/brio_3d_pipeline/classification/training/parsed_mappings/
+*.log
+__pycache__/
+*.pyc

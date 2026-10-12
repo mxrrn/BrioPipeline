@@ -49,32 +49,37 @@ Every slow stage (DUSt3R, SAM, proposals) is cached to disk and skipped on re-ru
 Read component manifest from InstanceDiagramS<N>.puml
   → class list, instance IDs, through-joint pairs
         │
-        ▼  preprocessor.py
+       ═══════════════════════  detection/  ═══════════════════════
+        ▼  detection/preprocessor.py
 Fixed-scale crop centred on the construction (largest-LCC + 20% padding)
   → half-resolution square crops, white margins, consistent across all samples
         │
-        ▼  dust3r_runner.py                        [GPU – cached]
+        ▼  detection/dust3r_runner.py                [GPU – cached]
 DUSt3R global alignment on all cropped images
   → pts3d (H×W×3) per view — world-space 3D coordinates for every pixel
   → confs (H×W) per view — per-pixel reconstruction confidence
         │
-        ▼  sam_runner.py                           [GPU – cached]
-SAM SamPredictor: tight-crop → black background → CLAHE → fg-grid prompts
+        ▼  detection/sam_runner.py                   [GPU – cached]
+SAM SamPredictor: tight-crop → black background → CLAHE → fg-grid + edge-aware
+DT-seed prompts (fixed 15px spacing, not derived from component count)
   → top-(N × keep_factor) masks per view, in fixed-scale image coordinates
         │
-        ▼  backprojector.py                        [CPU – cached]
+        ▼  detection/backprojector.py                [CPU – cached]
 For each SAM mask: index pts3d → 3D point cloud
+  (also calls classification/component_classifier.py per-mask for a visual
+   veto signal — the one dependency edge from detection/ into classification/)
 Voxel-overlap agglomerative clustering (avg-linkage, colour-repulsion)
   → N merged instance clouds
 DBSCAN noise removal per cloud
 Co-axial rod-fragment merge (occluded rod stubs)
 PCA elongation per cloud
         │
-        ▼  classifier.py
+       ═══════════════════════  classification/  ═══════════════════════
+        ▼  classification/classifier.py
 Hungarian optimal assignment of N clouds to N PUML components
   cost = colour_weight×HSV_dist + size_weight×|rel_obs−rel_nom|
        + elong_weight×|log(obs_elong)−log(nom_elong)|
-       + visual_mismatch_penalty (if MobileNetV3 is loaded)
+       + visual_mismatch_penalty (if MobileNetV3 is loaded — see Known limitation below)
         │
         ▼  pipeline.py (amodal extension)
 Extend through-joint rod bboxes along the rod PCA axis
@@ -82,6 +87,17 @@ Extend through-joint rod bboxes along the rod PCA axis
         ▼  results.json
 Per-component: instance_id, n_points, centroid (3,), bbox_size (3,)
 ```
+
+**Current status by phase** (`brio3d-improvement/dev`, 2026-08-13):
+
+| Phase | State |
+|---|---|
+| Preprocessing | Stable, unchanged for months |
+| 3D reconstruction (DUSt3R) | Stable, unchanged for months |
+| SAM | Actively improved this branch: fixed-spacing grid + edge-aware DT seeds, multi-granularity mask capture, banded coverage-greedy keep policy |
+| 3D backprojection | Working - flawed |
+| Classification | Working - flawed - colour/size/elongation cost |
+| Occlusion handling | Reduced to amodal through-joint rod bbox extension (`pipeline.py`).
 
 ---
 
@@ -729,6 +745,42 @@ python visualize.py --sample 114 --run run_021_20260616_2339
 ```
 
 Open `viz_3d.ply` in CloudCompare (Windows) or MeshLab for an interactive view of the raw 3D reconstruction.
+
+---
+
+### `visualize_sam_masks.py` — SAM mask debug overlay
+
+Renders the kept SAM masks per view (post-filter, pre-3D-clustering), one colour per mask, reusing the SAM cache from a previous run — no model load, no GPU needed.
+
+```bash
+python visualize_sam_masks.py 113
+python visualize_sam_masks.py 113 --run run_021_20260616_2339
+```
+
+Useful for isolating whether a problem is in SAM's 2D segmentation or in the 3D clustering/classification stages downstream.
+
+---
+
+### `visualize_sam_points.py` — SAM prompt-point debug overlay
+
+Shows where SAM's prompt points (uniform grid + edge-aware DT seeds) land on each view, without running SAM or DUSt3R.
+
+```bash
+python visualize_sam_points.py 113
+```
+
+---
+
+### `classification/training/` — Training-data builder (in progress)
+
+A separate, standalone tool for building a real-domain training set for the component classifier: `mapping_parser.py` reads hand-annotated seed points from each sample's `Mapping.drawio`, `dataset_builder.py` lifts them to 3D and reprojects them into every view to cut labelled crops, and `batch_build.py` runs that across many samples. It has its own cache directory and does not depend on or modify anything under `detection/` or the rest of `classification/`.
+
+```bash
+python classification/training/dataset_builder.py 113
+python classification/training/batch_build.py --limit 40
+```
+
+Not yet wired into `pipeline.py` — it produces a dataset, not a retrained `component_classifier.pth`.
 
 ---
 
