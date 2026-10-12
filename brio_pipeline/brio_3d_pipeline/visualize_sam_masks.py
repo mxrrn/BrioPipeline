@@ -28,17 +28,18 @@ _HEADER_H   = 28
 _MASK_ALPHA = 0.45
 
 
-def _find_run_dir(sample_id: int, run: str | None) -> Path:
+def _find_run_dir(sample_id: int, run: str | None, mode: str) -> Path:
+    outputs_root = cfg.OUTPUTS_ROOT_FREE if mode == "free" else cfg.OUTPUTS_ROOT
     if run is not None:
-        run_dir = cfg.OUTPUTS_ROOT / run
+        run_dir = outputs_root / run
         if not (run_dir / f"sample_{sample_id}").exists():
             raise FileNotFoundError(f"{run_dir}/sample_{sample_id} not found")
         return run_dir
-    candidates = sorted(cfg.OUTPUTS_ROOT.glob(f"run_*/sample_{sample_id}"),
+    candidates = sorted(outputs_root.glob(f"run_*/sample_{sample_id}"),
                         key=lambda p: p.parent.name)
     if not candidates:
         raise FileNotFoundError(
-            f"No run with sample_{sample_id} found under {cfg.OUTPUTS_ROOT} — "
+            f"No {mode}-mode run with sample_{sample_id} found under {outputs_root} — "
             f"run the pipeline for this sample first (e.g. ./slow.sh {sample_id})")
     return candidates[-1].parent
 
@@ -104,9 +105,13 @@ def main() -> None:
     p.add_argument("--run", type=str, default=None,
                    help="run dir name (e.g. run_034_20260807_1028); default: latest")
     p.add_argument("--max-views", type=int, default=None)
+    p.add_argument("--mode", default="enforce", choices=["enforce", "free"],
+                   help="which run history to look under — outputs/ (enforce, "
+                        "default) or outputs_free/ (free) — and which SAM cache "
+                        "key to match when reloading the masks")
     args = p.parse_args()
 
-    run_dir    = _find_run_dir(args.sample_id, args.run)
+    run_dir    = _find_run_dir(args.sample_id, args.run, args.mode)
     sample_dir = run_dir / f"sample_{args.sample_id}"
     cropped    = sample_dir / "cropped"
     img_paths  = sorted(cropped.glob("*.jpg")) + sorted(cropped.glob("*.JPG"))
@@ -131,6 +136,7 @@ def main() -> None:
         max_area_frac=cfg.SAM_MAX_AREA_FRAC, fg_overlap_min=cfg.SAM_FG_OVERLAP_MIN,
         dedup_iou=cfg.SAM_DEDUP_IOU, keep_factor=cfg.SAM_KEEP_FACTOR,
         mode="prompted", grid_spacing=cfg.SAM_GRID_SPACING, dt_seeds=cfg.SAM_DT_SEEDS,
+        manifest_mode=args.mode, free_max_masks=cfg.SAM_FREE_MAX_MASKS_PER_VIEW,
     )
 
     tiles, labels = [], []

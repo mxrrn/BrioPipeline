@@ -59,11 +59,17 @@ def _points_for_view(img_path: Path, grid_spacing: int, dt_seeds: bool):
 
 
 def _annotate_tile(crop_bgr: np.ndarray, pts: np.ndarray, is_dt: np.ndarray,
-                   tile_size: int = _TILE_SIZE) -> np.ndarray:
+                   tile_size: int = _TILE_SIZE, radius: int | None = None) -> np.ndarray:
+    """radius=None keeps the original per-point sizing (4 if dt else 3) — used
+    by prompted mode's sparse foreground grid. A fixed override is needed for
+    denser grids (e.g. auto mode's uniform 32x32=1024 points packed into a
+    tight crop) where the default radius makes neighbouring dots overlap into
+    a solid fill instead of legible individual points."""
     vis = crop_bgr.copy()
     for (x, y), dt in zip(pts.astype(int), is_dt):
         colour = _COLOUR_DT if dt else _COLOUR_GRID
-        cv2.circle(vis, (int(x), int(y)), 4 if dt else 3, colour, -1, cv2.LINE_AA)
+        r = radius if radius is not None else (4 if dt else 3)
+        cv2.circle(vis, (int(x), int(y)), r, colour, -1, cv2.LINE_AA)
 
     h, w = vis.shape[:2]
     scale = tile_size / max(h, w, 1)

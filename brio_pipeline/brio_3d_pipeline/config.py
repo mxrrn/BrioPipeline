@@ -9,6 +9,7 @@ CONSTRUCTIONS  = DATA_ROOT / "constructions"
 MULTI_VIEW     = DATA_ROOT / "multi_view_images"
 PROJECT_ROOT   = BA_ROOT / "00-project/brio_pipeline/brio_3d_pipeline"
 OUTPUTS_ROOT   = PROJECT_ROOT / "outputs"
+OUTPUTS_ROOT_FREE = PROJECT_ROOT / "outputs_free"   # isolated run history for --mode free
 LOGS_DIR       = PROJECT_ROOT / "logs"
 
 # Batch folder containing samples 112–150
@@ -80,6 +81,24 @@ VOXEL_SIZE_COMPONENT = 0.003   # voxel grid size (m) for component instance clou
 # ── 3D-overlap instance grouping ─────────────────────────────────────────────
 OVERLAP_MIN          = 0.15    # min voxel-overlap ratio (∩ / smaller set) to link two masks
 OVERLAP_VOXEL_DIV    = 80      # voxel size = scene bbox diagonal / this divisor
+
+# ── Manifest-enforcement mode ("enforce" vs "free") ───────────────────────────
+# "enforce" (default): SAM's per-view mask budget, the clustering target, and
+# the assignment step are all driven by the PUML manifest's N — the mode this
+# pipeline has always run in. "free": none of those are capped/forced by the
+# manifest; the manifest (if present) is used only afterward, for scoring.
+SAM_FREE_MAX_MASKS_PER_VIEW = 40    # absolute per-view mask cap in free mode,
+                                    # replacing N×SAM_KEEP_FACTOR — starting
+                                    # point, tune against debug/backproject/
+                                    # output once real free-mode runs exist
+FREE_CLUSTER_DIST_THRESHOLD = 0.7   # distance (=1-overlap) threshold for free-mode
+                                    # clustering (AgglomerativeClustering with
+                                    # distance_threshold instead of n_clusters=N).
+                                    # 0.7 ⇒ merge only above ~0.3 avg overlap —
+                                    # stricter than OVERLAP_MIN's edge threshold
+                                    # (0.15) since free mode should stay
+                                    # conservative about merging into fewer,
+                                    # larger objects, not looser
 
 # ── Co-axial rod fragment merging (purely geometric) ─────────────────────────
 MAX_ROD_GAP_M        = 0.12    # max gap (m) between co-axial fragments to merge (was 0.08)

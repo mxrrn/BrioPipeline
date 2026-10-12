@@ -5,6 +5,10 @@ Two modes are available (select via run_sam_on_images(..., mode=...)):
 
   "auto"     — SamAutomaticMaskGenerator with a uniform 32-pt grid.  The
                original approach.  Grid covers the full fixed-scale crop.
+               Shares "prompted" mode's tight-crop + pure-black-background +
+               CLAHE preprocessing (see below) — only the mask-generation
+               strategy (uniform grid vs. foreground-only prompts) differs
+               between the two modes now.
 
   "prompted" — SamPredictor with foreground-only grid prompts (DEFAULT).
                Before encoding, the image is cropped to the tight construction
@@ -455,7 +459,8 @@ def _run_sam_prompted(image_paths: list[Path], n_components: int,
                        min_area: int = 80, max_area_frac: float = 0.50,
                        fg_overlap_min: float = 0.60, dedup_iou: float = 0.80,
                        keep_factor: int = 2, grid_spacing: int = 15,
-                       dt_seeds: bool = True) -> list[list[dict]]:
+                       dt_seeds: bool = True, manifest_mode: str = "enforce",
+                       free_max_masks: int = 40) -> list[list[dict]]:
     """
     SAM in SamPredictor mode with tight-crop + black-bg + fg-grid prompts.
 
@@ -471,7 +476,8 @@ def _run_sam_prompted(image_paths: list[Path], n_components: int,
       6. SamPredictor: one encoder pass + M lightweight decoder passes.
       7. Expand masks back to fixed-scale image coordinates.
       8. Apply the standard filter pipeline (fg-overlap, border, dedup,
-         container-decompose, blob-split) and keep top N×keep_factor.
+         container-decompose, blob-split) and keep top N×keep_factor
+         (manifest_mode="enforce") or up to free_max_masks (manifest_mode="free").
 
     Amodal note: for rod classes with two exposed ends (occluded middle), the
     two separate SAM masks that result are co-axially merged in backprojector.py
@@ -479,7 +485,7 @@ def _run_sam_prompted(image_paths: list[Path], n_components: int,
     both ends — projecting it back to 2D per view gives the amodal 2D bbox
     for YOLO training.
     """
-    keep_n     = n_components * keep_factor
+    keep_n     = n_components * keep_factor if manifest_mode == "enforce" else free_max_masks
     cache_file = output_dir / (
         f"sam_masks_top{keep_n}_prompted_sp{grid_spacing}_dt{int(dt_seeds)}"
         f"_ma{min_area}_mf{max_area_frac}_allgran_v4_filt.pkl"
@@ -615,12 +621,20 @@ def run_sam_on_images(image_paths: list[Path], n_components: int,
                       max_area_frac: float = 0.50, fg_overlap_min: float = 0.60,
                       dedup_iou: float = 0.80, keep_factor: int = 2,
                       mode: str = "prompted", grid_spacing: int = 15,
-                      dt_seeds: bool = True) -> list[list[dict]]:
+                      dt_seeds: bool = True, manifest_mode: str = "enforce",
+                      free_max_masks: int = 40) -> list[list[dict]]:
     """
-    Run SAM on each image and return up to keep_factor×N masks per image.
+    Run SAM on each image and return up to keep_factor×N masks per image
+    (manifest_mode="enforce") or up to free_max_masks (manifest_mode="free").
 
     mode="prompted" (default): tight-crop + black-bg + fg-grid + SamPredictor.
     mode="auto":               SamAutomaticMaskGenerator (original approach).
+
+    manifest_mode="enforce" (default): per-view budget is n_components×keep_factor,
+        i.e. driven by the PUML manifest — the mode this pipeline has always run in.
+    manifest_mode="free": budget is the fixed free_max_masks, independent of any
+        manifest — keeps whatever survives the quality filters, capped only to
+        bound compute.
 
     Returns list (one per image) of list of mask dicts:
         segmentation : (H, W) bool array  — in fixed-scale image coords
@@ -635,12 +649,13 @@ def run_sam_on_images(image_paths: list[Path], n_components: int,
             min_area=min_area, max_area_frac=max_area_frac,
             fg_overlap_min=fg_overlap_min, dedup_iou=dedup_iou,
             keep_factor=keep_factor, grid_spacing=grid_spacing,
-            dt_seeds=dt_seeds,
+            dt_seeds=dt_seeds, manifest_mode=manifest_mode,
+            free_max_masks=free_max_masks,
         )
 
     # ── Auto mode (original) ──────────────────────────────────────────────────
-    keep_n = n_components * keep_factor
-    cache_file = output_dir / f"sam_masks_top{keep_n}_pts{points_per_side}_filt3.pkl"
+    keep_n = n_components * keep_factor if manifest_mode == "enforce" else free_max_masks
+    cache_file = output_dir / f"sam_masks_top{keep_n}_pts{points_per_side}_tightcrop_blackbg_filt3.pkl"
     if cache_file.exists():
         print(f"[SAM] Loading cached masks from {cache_file}")
         with open(cache_file, "rb") as f:
@@ -669,16 +684,27 @@ def run_sam_on_images(image_paths: list[Path], n_components: int,
     for idx, img_path in enumerate(image_paths):
         t0 = time.time()
         image_bgr = cv2.imread(str(img_path))
-        fg        = _foreground_mask(image_bgr)           # on ORIGINAL image
-        image_bgr[~fg] = 128                              # grey-fill background before CLAHE+SAM
-        image_bgr = _clahe_enhance(image_bgr)
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        H_orig, W_orig = image_bgr.shape[:2]
+        fg = _foreground_mask(image_bgr)                  # on ORIGINAL image
 
-        masks = mask_gen.generate(image_rgb)
+        # Same preprocessing as prompted mode: tight-crop to the foreground
+        # bbox (SAM encodes only the construction, not wasted white padding)
+        # + pure black background (not grey) for maximum contrast + CLAHE.
+        crop_bgr, crop_fg, x_off, y_off = _tight_fg_crop(image_bgr, fg)
+        crop_bgr[~crop_fg] = 0
+        crop_bgr = _clahe_enhance(crop_bgr)
+        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+
+        masks = mask_gen.generate(crop_rgb)
         t_gen = time.time() - t0
         n_raw_total += len(masks)
 
-        filtered = _filter_masks(masks, fg,
+        # Translate masks from crop space → fixed-scale image space, same as
+        # prompted mode, so downstream filtering/backprojection see full-image
+        # coordinates regardless of which SAM mode produced the masks.
+        full_masks = _expand_masks(masks, H_orig, W_orig, x_off, y_off)
+
+        filtered = _filter_masks(full_masks, fg,
                                  max_area_frac=max_area_frac,
                                  fg_overlap_min=fg_overlap_min,
                                  dedup_iou=dedup_iou, min_area=min_area)

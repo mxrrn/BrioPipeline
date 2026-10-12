@@ -35,13 +35,26 @@ import base64
 import html
 import json
 import re
+import sys
 import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from classification.component_map import FOLDER_TO_CLASS  # noqa: E402
+
 CONSTRUCTIONS = Path("/mnt/c/BA/02-resources/data/constructions")
 MULTI_VIEW    = Path("/mnt/c/BA/02-resources/data/multi_view_images")
 DEFAULT_OUT   = Path(__file__).parent / "parsed_mappings"
+
+# Canonical PUML class codes a drawio label's "cls" segment should resolve
+# to. Annotation labels are hand-typed, so a folder name (e.g. "wheelwhite")
+# can end up typed instead of the short code ("whwh") -- a real typo found
+# in sample_9.json. FOLDER_TO_CLASS already maps folder name -> code, so it
+# doubles as the alias table; codes that match neither the canonical set nor
+# a known folder name are left as-is and loudly flagged (see _normalize_cls
+# below), never guessed.
+_CANONICAL_CLASSES = set(FOLDER_TO_CLASS.values())
 
 # Instance label:  cls_index          e.g. nu_1, plwo53_2
 # Slot label:      cls_index&{slot}_k e.g. nu_1&{th}_1, bo_1&{pi}_2
@@ -181,6 +194,22 @@ def parse_mapping(sample_id: int) -> dict:
             return None
         return dx, dy
 
+    def _normalize_cls(cls: str, label: str) -> str:
+        """Resolve a raw drawio-typed class code to the canonical PUML code.
+        See _CANONICAL_CLASSES above for why this exists."""
+        if cls in _CANONICAL_CLASSES:
+            return cls
+        if cls in FOLDER_TO_CLASS:
+            fixed = FOLDER_TO_CLASS[cls]
+            warnings.append(f"'{label}': normalized non-canonical class code "
+                            f"'{cls}' (folder name) -> '{fixed}'")
+            return fixed
+        warnings.append(f"'{label}': unrecognized class code '{cls}' -- not a "
+                        f"canonical code or known folder name, needs "
+                        f"annotation review. Left as-is; will not produce "
+                        f"training crops until fixed.")
+        return cls
+
     def _add_point(label: str, fx: float, fy: float,
                    coord_src: str = "entry",
                    label_id: str | None = None,
@@ -192,12 +221,12 @@ def parse_mapping(sample_id: int) -> dict:
         m_inst = _INSTANCE_RE.match(label)
         if m_slot:
             base, slot, slot_idx = m_slot.groups()
-            cls = base.rsplit("_", 1)[0]
+            cls = _normalize_cls(base.rsplit("_", 1)[0], label)
             points.append({"label": label, "kind": "slot", "base": base,
                            "cls": cls, "slot": slot, "slot_idx": int(slot_idx),
                            "fx": fx, "fy": fy, **extra})
         elif m_inst:
-            cls = m_inst.group(1)
+            cls = _normalize_cls(m_inst.group(1), label)
             points.append({"label": label, "kind": "instance", "base": label,
                            "cls": cls, "slot": None, "slot_idx": None,
                            "fx": fx, "fy": fy, **extra})

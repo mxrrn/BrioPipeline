@@ -151,6 +151,18 @@ def load_color_prototypes() -> dict[str, np.ndarray]:
 COLOR_ACCEPT = 65.0    # max colour distance to the class prototype to accept
 COLOR_FALLBK = 100.0   # fallback: best point along the ray must beat this
 
+# ti/whre/rolo seeds were found (classification/training/diagnose_snap.py,
+# see .claude plan "Ensure all 29 classes are included in one-vs-all
+# training") to have a real arrow-to-part gap exceeding the default 250px
+# stub-gap assumption -- every one of their "snap found no foreground"
+# failures never found ANY solid pixel at 250px, but 12/13 succeeded (several
+# with near-perfect colour matches) once the search was allowed to travel to
+# 1000px, proving direction/colour logic were fine all along. Scoped to just
+# these classes so the other 26, already working at the default distance,
+# are provably unaffected by this change.
+EXTENDED_MAX_DIST_CLASSES = {"ti", "whre", "rolo"}
+EXTENDED_MAX_DIST = 1000.0
+
 
 def _color_metric(patch_med: np.ndarray, proto: np.ndarray) -> float:
     """0.5·L2(BGR) + 3·L2(chroma), chroma = (B−G, G−R). The chroma term
@@ -243,7 +255,7 @@ def collect_images(sample_id: int) -> list[Path]:
 
 
 def sample_half(image_paths: list[Path]) -> int:
-    from preprocessor import _sample_lcc_halfsize
+    from detection.preprocessor import _sample_lcc_halfsize
     need = int(np.ceil(_sample_lcc_halfsize(image_paths) * (1 + cfg.AUTO_CROP_PADDING)))
     return max(MIN_HALF, need)
 
@@ -320,6 +332,8 @@ def build_sample(sample_id: int, out_dir: Path, render: bool = False,
         if s.get("dfx") is not None:
             d = (s["dfx"] * Wf, s["dfy"] * Hf)
         max_dist = 400.0 if s.get("coord_src") == "abs" else 250.0
+        if s["cls"] in EXTENDED_MAX_DIST_CLASSES:
+            max_dist = EXTENDED_MAX_DIST
         snap = snap_to_foreground(ann_full, fg_full, x_full, y_full, d,
                                   max_dist, protos.get(s["cls"]))
         if snap is None:

@@ -65,7 +65,11 @@ def _extract_mask_cloud(pts3d_frame: np.ndarray, mask: np.ndarray,
     valid = np.linalg.norm(pts, axis=1) > 1e-6
     pts   = pts[valid].astype(np.float32)
     if len(pts) > _CLOUD_MAX_PTS:
-        idx = np.random.choice(len(pts), _CLOUD_MAX_PTS, replace=False)
+        # Fixed seed (matches _dbscan_cleanup's convention) — this was
+        # previously unseeded, making every run non-deterministic for any
+        # mask cloud over 5000 points, independent of any mode-toggle work.
+        rng = np.random.default_rng(seed=42)
+        idx = rng.choice(len(pts), _CLOUD_MAX_PTS, replace=False)
         pts = pts[idx]
     return pts
 
@@ -135,6 +139,52 @@ def _save_debug_ply(clouds: list[np.ndarray], out_path: Path) -> None:
     print(f"[Backproject] Debug point cloud → {out_path} ({len(pcd.points)} pts, {len(pts_list)} groups)")
 
 
+def _save_debug_png(clouds: list[np.ndarray], out_path: Path, title: str) -> None:
+    """3-panel (isometric/top-down/front) scatter snapshot of `clouds`, one
+    colour per cloud (same palette as _save_debug_ply). No EGL/OffscreenRenderer
+    dependency (unavailable in WSL2) — matplotlib Agg backend only, so this
+    always works, unlike the classified viz_3d.png path in visualize.py."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    non_empty = [(i, c) for i, c in enumerate(clouds) if len(c) > 0]
+    if not non_empty:
+        return
+    title = f"{title} — {len(non_empty)} groups"
+    colours  = _distinct_colors(len(clouds))
+    all_pts  = np.concatenate([c for _, c in non_empty], axis=0)
+    c_min, c_max = all_pts.min(axis=0), all_pts.max(axis=0)
+    centre   = (c_min + c_max) / 2
+    margin   = max(float(np.linalg.norm(c_max - c_min)) * 0.6, 0.02)
+
+    views = [("Isometric", 20, 45), ("Top-down", 90, 0), ("Front", 0, 0)]
+    fig = plt.figure(figsize=(21, 7), facecolor="#1a1a1a")
+    for panel_i, (view_name, elev, azim) in enumerate(views):
+        ax = fig.add_subplot(1, 3, panel_i + 1, projection="3d")
+        ax.set_facecolor("#1e1e1e")
+        for i, pts in non_empty:
+            n   = min(4_000, len(pts))
+            idx = np.random.choice(len(pts), n, replace=False)
+            ax.scatter(pts[idx, 0], pts[idx, 1], pts[idx, 2],
+                       c=[colours[i]], s=3.5, alpha=0.85, linewidths=0)
+        ax.set_xlim(centre[0] - margin, centre[0] + margin)
+        ax.set_ylim(centre[1] - margin, centre[1] + margin)
+        ax.set_zlim(centre[2] - margin, centre[2] + margin)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(view_name, color="white", fontsize=11)
+        ax.tick_params(colors="white")
+        for spine in ax.spines.values():
+            spine.set_color("white")
+
+    fig.suptitle(title, color="white", fontsize=13, y=1.02)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=130, bbox_inches="tight", facecolor="#1a1a1a")
+    plt.close(fig)
+    print(f"[Backproject] Debug preview PNG → {out_path}")
+
+
 _DBSCAN_MAX_PTS = 20_000   # subsample cap to keep DBSCAN memory O(n), not O(n²)
 
 
@@ -193,19 +243,30 @@ def _overlap_group(clouds: list[np.ndarray], n_target: int,
                    colours: np.ndarray | None = None,
                    color_weight: float = 0.0,
                    provenance: list[tuple[int, int]] | None = None,
-                   debug_dir: Path | None = None) -> np.ndarray:
+                   debug_dir: Path | None = None,
+                   manifest_mode: str = "enforce",
+                   free_dist_threshold: float = 0.7) -> np.ndarray:
     """
     Group per-view mask clouds by 3D voxel overlap.
 
     Pairwise affinity:
         overlap_ij = |voxels_i ∩ voxels_j| / min(|voxels_i|, |voxels_j|)
     (clipped to 0 below overlap_min).  Groups come from AVERAGE-LINKAGE
-    agglomerative clustering on distance 1 − overlap with n_clusters = N.
-    Average linkage is essential: connected components / single linkage
-    chain through shared boundary voxels and collapse the whole assembly
-    into one blob (observed on sample 113: 200 clouds → 2 components).
+    agglomerative clustering on distance 1 − overlap. Average linkage is
+    essential: connected components / single linkage chain through shared
+    boundary voxels and collapse the whole assembly into one blob (observed
+    on sample 113: 200 clouds → 2 components).
 
-    Returns an int label array (len == len(clouds), values in [0, n_target)).
+    manifest_mode="enforce" (default): n_clusters is forced to n_target (the
+        PUML manifest's N) — the mode this pipeline has always run in.
+    manifest_mode="free": no forced count. AgglomerativeClustering runs with
+        distance_threshold=free_dist_threshold instead of n_clusters, so the
+        number of groups is whatever the overlap graph actually supports —
+        still average-linkage, so it doesn't inherit the connected-components
+        chaining failure mode described above.
+
+    Returns an int label array (len == len(clouds)), values in [0, n_groups)
+    where n_groups == n_target in enforce mode, or data-dependent in free mode.
     """
     from sklearn.cluster import AgglomerativeClustering
 
@@ -251,9 +312,19 @@ def _overlap_group(clouds: list[np.ndarray], n_target: int,
                 dist[a, b] += color_weight * cd
                 dist[b, a] += color_weight * cd
 
-    lab_valid = AgglomerativeClustering(
-        n_clusters=n_groups, metric="precomputed", linkage="average"
-    ).fit_predict(dist)
+    if manifest_mode == "enforce":
+        lab_valid = AgglomerativeClustering(
+            n_clusters=n_groups, metric="precomputed", linkage="average"
+        ).fit_predict(dist)
+    elif nv <= 1:
+        lab_valid = np.zeros(nv, np.int64)
+        n_groups = nv
+    else:
+        lab_valid = AgglomerativeClustering(
+            n_clusters=None, distance_threshold=free_dist_threshold,
+            metric="precomputed", linkage="average"
+        ).fit_predict(dist)
+        n_groups = int(lab_valid.max()) + 1
 
     # Stable ordering: biggest group (by points) first
     sizes = np.zeros(n_groups)
@@ -417,9 +488,10 @@ def compute_proposals(dust3r_result: dict,
                       classifier=None,
                       conf_thresh: float = 0.40,
                       debug_dir: Path | None = None,
+                      manifest_mode: str = "enforce",
                       ) -> tuple[list[np.ndarray], list[str | None], list[np.ndarray]]:
     """
-    SAM masks × DUSt3R pts3d → N merged + cleaned 3D instance point clouds.
+    SAM masks × DUSt3R pts3d → merged + cleaned 3D instance point clouds.
 
     Args:
         dust3r_result      : output of dust3r_runner.run_dust3r()
@@ -433,19 +505,28 @@ def compute_proposals(dust3r_result: dict,
                               graph, cluster assignment, coaxial merges, coloured
                               .ply clouds) — also bypasses the proposals cache so
                               debug runs always reflect the current inputs
+        manifest_mode        : "enforce" (default) pads/clusters/returns exactly
+                              n_components proposals — unchanged prior behaviour.
+                              "free" does neither: no padding, and the cluster
+                              count returned is whatever _overlap_group finds.
 
-    Returns (clouds, visual_cls, cluster_colours, cluster_elongations):
-        clouds               : list of N (M_i, 3) world-space float32 arrays
-        visual_cls           : list of N dominant visual class codes (or None per cluster)
-        cluster_colours      : list of N mean HSV (3,) float32 arrays in [0,1]
-        cluster_elongations  : list of N PCA elongation values (σ₁/σ₂, ≥1)
+    Returns (clouds, visual_cls, cluster_colours, cluster_elongations), each of
+    length n_components in enforce mode or data-dependent in free mode:
+        clouds               : list of (M_i, 3) world-space float32 arrays
+        visual_cls           : list of dominant visual class codes (or None per cluster)
+        cluster_colours      : list of mean HSV (3,) float32 arrays in [0,1]
+        cluster_elongations  : list of PCA elongation values (σ₁/σ₂, ≥1)
 
     DBSCAN subsampling uses a fixed seed (42) so the output is reproducible;
     without a seed, bbox-based features change across cache misses.
     """
     use_visual = classifier is not None
     cache_suffix = "_vis" if use_visual else ""
-    cache_file = output_dir / f"proposals_N{n_components}_v12{cache_suffix}.pkl"
+    mode_suffix = "" if manifest_mode == "enforce" else f"_{manifest_mode}"
+    # v13: bumped from v12 after fixing the conf_thresh/DUST3R_CONF_THRESH
+    # collision above — v12 caches were computed with the visual classifier
+    # vote silently disabled and must not be reused as if they reflect it.
+    cache_file = output_dir / f"proposals_N{n_components}_v13{mode_suffix}{cache_suffix}.pkl"
     if cache_file.exists() and debug_dir is None:
         print(f"[Backproject] Loading cached proposals from {cache_file}")
         with open(cache_file, "rb") as f:
@@ -455,11 +536,23 @@ def compute_proposals(dust3r_result: dict,
     pts3d_all = dust3r_result["pts3d"]   # list of (H, W, 3)
     confs_all = dust3r_result.get("confs")   # list of (H, W) or None (old cache)
     import config as _cfg
-    conf_thresh = _cfg.DUST3R_CONF_THRESH if confs_all is not None else 0.0
+    # BUG FIX (2026-08-14): this used to reassign the *parameter* conf_thresh
+    # (the caller's CLASSIFIER_CONF_THRESH, meant to gate the visual
+    # classifier below) to DUST3R_CONF_THRESH — a different threshold on a
+    # different scale (2.0, vs. a softmax probability in [0,1]) meant only
+    # for _extract_mask_cloud's point-confidence filter a few lines down.
+    # That silently made `pred_conf >= conf_thresh` (softmax prob >= 2.0)
+    # never true, so the visual classifier's vote never reached
+    # assign_classes() despite its docstring calling it the dominant signal.
+    # Kept as a separate variable now so the two thresholds can't collide.
+    dust3r_conf_thresh = _cfg.DUST3R_CONF_THRESH if confs_all is not None else 0.0
     use_colour = image_paths is not None
-    print(f"[Backproject] {len(sam_masks_per_image)} views × top-{n_components} masks  "
-          f"colour={'yes' if use_colour else 'no'}  visual={'yes' if use_visual else 'no'}  "
-          f"conf_filter={'>=%.1f' % conf_thresh if confs_all is not None else 'off'}")
+    budget_str = f"top-{n_components}" if manifest_mode == "enforce" else "unbudgeted"
+    print(f"[Backproject] {len(sam_masks_per_image)} views × {budget_str} masks  "
+          f"mode={manifest_mode}  colour={'yes' if use_colour else 'no'}  "
+          f"visual={'yes' if use_visual else 'no'}  "
+          f"conf_filter={'>=%.1f' % dust3r_conf_thresh if confs_all is not None else 'off'}  "
+          f"visual_conf_filter=>={conf_thresh:.2f}")
 
     from classification.component_classifier import crop_from_mask
 
@@ -488,7 +581,7 @@ def compute_proposals(dust3r_result: dict,
 
         for mask_idx, mask_dict in enumerate(masks):
             seg = mask_dict["segmentation"]
-            pts = _extract_mask_cloud(p3d, seg, conf=conf, conf_thresh=conf_thresh)
+            pts = _extract_mask_cloud(p3d, seg, conf=conf, conf_thresh=dust3r_conf_thresh)
             if len(pts) < 20:
                 continue
 
@@ -516,7 +609,7 @@ def compute_proposals(dust3r_result: dict,
             if pred_conf >= conf_thresh:
                 all_visual_cls[cloud_idx] = pred_cls
 
-    if len(all_clouds) < n_components:
+    if manifest_mode == "enforce" and len(all_clouds) < n_components:
         print(f"[Backproject] WARNING: only {len(all_clouds)} valid clouds for "
               f"{n_components} components — padding")
         while len(all_clouds) < n_components:
@@ -531,8 +624,9 @@ def compute_proposals(dust3r_result: dict,
     if debug_dir is not None:
         _save_debug_ply(all_clouds, debug_dir / "raw_by_mask.ply")
 
-    print(f"[Backproject] Grouping {len(all_clouds)} clouds into ≤{n_components} "
-          f"instances via 3D voxel overlap")
+    print(f"[Backproject] Grouping {len(all_clouds)} clouds "
+          f"{'into ≤' + str(n_components) + ' instances' if manifest_mode == 'enforce' else 'by overlap (no forced count)'} "
+          f"via 3D voxel overlap")
 
     # ── 3D-overlap graph grouping ─────────────────────────────────────────
     labels = _overlap_group(all_clouds, n_components,
@@ -541,7 +635,11 @@ def compute_proposals(dust3r_result: dict,
                             colours=colours_arr,
                             color_weight=_cfg.COLOR_DIST_WEIGHT,
                             provenance=all_provenance,
-                            debug_dir=debug_dir)
+                            debug_dir=debug_dir,
+                            manifest_mode=manifest_mode,
+                            free_dist_threshold=_cfg.FREE_CLUSTER_DIST_THRESHOLD)
+    n_groups = n_components if manifest_mode == "enforce" \
+               else (int(labels.max()) + 1 if len(labels) else 0)
 
     # ── Merge + DBSCAN cleanup + visual majority vote ─────────────────────
     merged: list[np.ndarray] = []
@@ -549,7 +647,7 @@ def compute_proposals(dust3r_result: dict,
     cluster_colours: list[np.ndarray] = []
     cluster_debug_records: list[dict] = []
 
-    for cid in range(n_components):
+    for cid in range(n_groups):
         idx   = np.where(labels == cid)[0]
         raw   = np.concatenate([all_clouds[i] for i in idx], axis=0) \
                 if len(idx) else np.empty((0, 3), np.float32)
@@ -598,6 +696,8 @@ def compute_proposals(dust3r_result: dict,
 
     if debug_dir is not None:
         _save_debug_ply(merged, debug_dir / "clusters_final.ply")
+        _save_debug_png(merged, debug_dir / "clusters_final.png",
+                        title=f"Sample clusters (mode={manifest_mode}, pre-classification)")
 
     print(f"[Backproject] Results after DBSCAN cleanup + co-axial merge:")
     for i, (pts, vcls) in enumerate(zip(merged, visual_cls_per_cluster)):
